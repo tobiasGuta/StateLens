@@ -44,6 +44,7 @@ export function fixtureObservation(
     projectId: "project-1",
     workflowId: "workflow-1",
     accountContextId: "account-1",
+    sessionSequence: 1,
     timestamp: "2026-07-18T12:00:01.000Z",
     method: "GET",
     url: "https://api.example.test/invoices/inv_781",

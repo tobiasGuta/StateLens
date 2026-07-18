@@ -1,7 +1,7 @@
 import { readFile, readdir } from "node:fs/promises";
 import { resolve, relative } from "node:path";
 
-const root = resolve(import.meta.dirname, "..");
+const root = resolve(process.env.STATELENS_VERIFY_ROOT ?? resolve(import.meta.dirname, ".."));
 const targets = [
   resolve(root, "src"),
   resolve(root, "public"),

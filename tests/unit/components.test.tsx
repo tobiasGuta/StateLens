@@ -3,6 +3,11 @@ import { useState } from "react";
 import { describe, expect, it, vi } from "vitest";
 import { ProjectSetup } from "../../src/panel/components/ProjectSetup";
 import { EvidenceActions } from "../../src/panel/components/EvidenceActions";
+import { RecorderBar } from "../../src/panel/components/RecorderBar";
+import {
+  FinalizationRecoveryPanel,
+  InterruptedWorkflowPanel,
+} from "../../src/panel/components/RecoveryPanel";
 import { Timeline } from "../../src/panel/components/Timeline";
 import { normalizeScopeRuleValue } from "../../src/security/scope-validator";
 import { fixtureObservation, fixtureProject, fixtureWorkflow } from "../fixtures/records";
@@ -121,6 +126,24 @@ describe("MVP components", () => {
     fireEvent.click(screen.getByText("/invoices/inv_781"));
     expect(onSelect).toHaveBeenCalledWith(observation);
   });
+
+  it("orders equal-timestamp observations by session sequence", () => {
+    const timestamp = "2026-07-18T12:00:01.000Z";
+    const { container } = render(
+      <Timeline
+        observations={[
+          fixtureObservation({ id: "second", timestamp, sessionSequence: 2, path: "/second" }),
+          fixtureObservation({ id: "first", timestamp, sessionSequence: 1, path: "/first" }),
+        ]}
+        markers={[]}
+        onSelect={vi.fn()}
+      />,
+    );
+    const paths = [...container.querySelectorAll(".timeline-entry.request strong")].map(
+      (element) => element.textContent,
+    );
+    expect(paths).toEqual(["/first", "/second"]);
+  });
 });
 
 describe("evidence actions", () => {
@@ -140,6 +163,7 @@ describe("evidence actions", () => {
         projectName="Example target"
         counts={counts}
         captureState="idle"
+        purgeBlocked={false}
         onExport={vi.fn().mockRejectedValue(new Error("Download blocked"))}
         onPurge={onPurge}
         onError={onError}
@@ -157,6 +181,7 @@ describe("evidence actions", () => {
         projectName="Example target"
         counts={counts}
         captureState="idle"
+        purgeBlocked={false}
         onExport={vi
           .fn()
           .mockResolvedValue({ filename: "example.json", sha256: "a".repeat(64), byteSize: 42 })}
@@ -177,6 +202,7 @@ describe("evidence actions", () => {
         projectName="Example target"
         counts={counts}
         captureState="idle"
+        purgeBlocked={false}
         onExport={vi.fn()}
         onPurge={onPurge}
         onError={vi.fn()}
@@ -193,6 +219,96 @@ describe("evidence actions", () => {
     });
     fireEvent.click(purge);
     await waitFor(() => expect(onPurge).toHaveBeenCalledWith("Example target"));
+  });
+
+  it("keeps export available while finalization recovery blocks purge", async () => {
+    const onExport = vi
+      .fn()
+      .mockResolvedValue({ filename: "recovery.json", sha256: "b".repeat(64), byteSize: 12 });
+    render(
+      <EvidenceActions
+        projectName="Example target"
+        counts={counts}
+        captureState="finalization-error"
+        purgeBlocked
+        onExport={onExport}
+        onPurge={vi.fn()}
+        onError={vi.fn()}
+        onActionStart={vi.fn()}
+      />,
+    );
+    const exportButton = screen.getByRole("button", { name: /Initiate sanitized/i });
+    expect(exportButton).toBeEnabled();
+    expect(screen.getByRole("button", { name: /Begin purge/i })).toBeDisabled();
+    fireEvent.click(exportButton);
+    await waitFor(() => expect(onExport).toHaveBeenCalledTimes(1));
+  });
+});
+
+describe("workflow recovery controls", () => {
+  const summary = {
+    sessionId: "session-1",
+    completed: 2,
+    timedOut: 0,
+    discarded: 0,
+    failed: 0,
+    ignoredOutOfScope: 1,
+  };
+
+  it("shows finalization failure, blocks recording, and permits repeated retry attempts", async () => {
+    const onRetry = vi.fn().mockRejectedValue(new Error("IndexedDB still unavailable"));
+    const onError = vi.fn();
+    render(
+      <>
+        <FinalizationRecoveryPanel
+          error="Initial finalization failure"
+          summary={summary}
+          onRetry={onRetry}
+          onExport={vi.fn()}
+          onError={onError}
+        />
+        <RecorderBar
+          workflow={fixtureWorkflow()}
+          canRecord={false}
+          ignoredCount={0}
+          storageBytes={0}
+          onStart={vi.fn()}
+          onStop={vi.fn()}
+          onMarker={vi.fn()}
+          onEndMarker={vi.fn()}
+          captureState="finalization-error"
+          lastDrainSummary={summary}
+          onError={vi.fn()}
+          onActionStart={vi.fn()}
+        />
+      </>,
+    );
+    expect(screen.getByText("Recording finalization failed")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Start recording" })).toBeDisabled();
+    const retry = screen.getByRole("button", { name: "Retry finalization" });
+    fireEvent.click(retry);
+    await waitFor(() => expect(onRetry).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(retry).toBeEnabled());
+    fireEvent.click(retry);
+    await waitFor(() => expect(onRetry).toHaveBeenCalledTimes(2));
+    expect(screen.getByText("Initial finalization failure")).toBeVisible();
+    expect(onError).toHaveBeenCalledWith("IndexedDB still unavailable");
+  });
+
+  it("offers interrupted finalization but prevents casual deletion of non-empty evidence", async () => {
+    const onFinalize = vi.fn().mockResolvedValue(undefined);
+    render(
+      <InterruptedWorkflowPanel
+        candidate={{ workflow: fixtureWorkflow(), observationCount: 3, openMarkerCount: 1 }}
+        onFinalize={onFinalize}
+        onKeep={vi.fn()}
+        onDiscard={vi.fn()}
+        onError={vi.fn()}
+      />,
+    );
+    expect(screen.getByRole("button", { name: "Discard empty workflow" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Finalize as interrupted" }));
+    await waitFor(() => expect(onFinalize).toHaveBeenCalledTimes(1));
   });
 });
 

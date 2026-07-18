@@ -12,6 +12,7 @@ const INLINE_SECRET_PATTERNS = [
 ] as const;
 
 export function isSensitiveField(name: string): boolean {
+  if (name === "sessionSequence") return false;
   const normalized = name.replace(/([a-z0-9])([A-Z])/g, "$1-$2");
   return (
     SENSITIVE_FIELD_PATTERN.test(name.toLowerCase()) || SENSITIVE_FIELD_PATTERN.test(normalized)

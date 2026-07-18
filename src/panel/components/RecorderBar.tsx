@@ -1,6 +1,6 @@
 import { useState, type FormEvent } from "react";
 import type { Workflow } from "../../shared/schemas";
-import type { CaptureDrainSummary } from "../../shared/types";
+import type { CaptureDrainSummary, CaptureState } from "../../shared/types";
 import { useAsyncAction } from "../hooks/use-async-action";
 
 interface RecorderBarProps {
@@ -13,7 +13,7 @@ interface RecorderBarProps {
   onMarker: (label: string, notes?: string) => Promise<void>;
   onEndMarker: () => Promise<void>;
   activeMarkerLabel?: string | undefined;
-  captureState: "idle" | "recording" | "stopping";
+  captureState: CaptureState;
   lastDrainSummary?: CaptureDrainSummary | undefined;
   onError: (message: string) => void;
   onActionStart: () => void;
@@ -24,13 +24,20 @@ export function RecorderBar(props: RecorderBarProps) {
   const action = useAsyncAction(props.onError, props.onActionStart);
   const isRecording = props.captureState === "recording";
   const isStopping = props.captureState === "stopping";
+  const needsFinalization = props.captureState === "finalization-error";
   return (
     <div className={isRecording ? "recorder recording" : "recorder"}>
       <div className="recording-state">
         <span className="status-dot" />
         <div>
           <strong>
-            {isStopping ? "Stopping and draining" : isRecording ? "Recording" : "Recorder idle"}
+            {isStopping
+              ? "Stopping and draining"
+              : isRecording
+                ? "Recording"
+                : needsFinalization
+                  ? "Finalization recovery required"
+                  : "Recorder idle"}
           </strong>
           <small>{props.workflow?.name ?? "Select a workflow"}</small>
         </div>
@@ -45,7 +52,7 @@ export function RecorderBar(props: RecorderBarProps) {
           <button
             className="primary"
             type="button"
-            disabled={!props.canRecord || action.submitting || isStopping}
+            disabled={!props.canRecord || action.submitting || isStopping || needsFinalization}
             onClick={() => action.run(props.onStart)}
           >
             Start recording
@@ -106,12 +113,14 @@ export function RecorderBar(props: RecorderBarProps) {
           <button type="submit">Mark now</button>
         </form>
       )}
-      {props.lastDrainSummary && props.captureState === "idle" && (
-        <small className="drain-summary">
-          Last stop: {props.lastDrainSummary.completed} completed, {props.lastDrainSummary.timedOut}{" "}
-          timed out, {props.lastDrainSummary.discarded} discarded.
-        </small>
-      )}
+      {props.lastDrainSummary &&
+        (props.captureState === "idle" || props.captureState === "finalization-error") && (
+          <small className="drain-summary">
+            Last stop: {props.lastDrainSummary.completed} completed,{" "}
+            {props.lastDrainSummary.timedOut} timed out, {props.lastDrainSummary.discarded}{" "}
+            discarded, {props.lastDrainSummary.failed} failed.
+          </small>
+        )}
     </div>
   );
 }

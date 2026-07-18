@@ -706,6 +706,33 @@ main {
   border-radius: 6px;
   background: #321b20;
 }
+
+.recovery-panel {
+  margin: 0 24px 18px;
+  padding: 18px;
+  border: 1px solid #d97706;
+  border-radius: 10px;
+  background: #fff7ed;
+  color: #7c2d12;
+}
+
+.recovery-panel h2 {
+  margin-top: 0;
+}
+
+.recovery-error {
+  padding: 10px;
+  border-radius: 6px;
+  background: #fee2e2;
+  color: #991b1b;
+  overflow-wrap: anywhere;
+}
+
+.recovery-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
 .purge-confirmation > div {
   display: flex;
   justify-content: flex-end;

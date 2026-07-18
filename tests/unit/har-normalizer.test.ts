@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { normalizeHarEntry, type HarEntryLike } from "../../src/capture/har-normalizer";
+import { requestObservationSchema } from "../../src/shared/schemas";
 import { fixtureProject, fixtureWorkflow } from "../fixtures/records";
 
 const entry: HarEntryLike = {
@@ -29,6 +30,7 @@ describe("HAR normalization", () => {
         workflow: fixtureWorkflow(),
         accountContext: { id: "account-1", projectId: "project-1", name: "Account A" },
       },
+      1,
     );
     expect(observation.method).toBe("POST");
     expect(new URL(observation.url).searchParams.get("access_token")).toBe("[REDACTED]");
@@ -38,6 +40,10 @@ describe("HAR normalization", () => {
     expect(JSON.stringify(observation)).not.toContain("header-secret");
     expect(JSON.stringify(observation)).not.toContain("response-secret");
     expect(observation.redactionStatus).toBe("redacted");
+    expect(observation.sessionSequence).toBe(1);
+    expect(requestObservationSchema.safeParse({ ...observation, sessionSequence: 0 }).success).toBe(
+      false,
+    );
   });
 
   it("refuses normalization for out-of-scope entries", async () => {
@@ -50,6 +56,7 @@ describe("HAR normalization", () => {
           workflow: fixtureWorkflow(),
           accountContext: { id: "account-1", projectId: "project-1", name: "A" },
         },
+        1,
       ),
     ).rejects.toThrow("Out-of-scope");
   });
@@ -63,6 +70,7 @@ describe("HAR normalization", () => {
         workflow: fixtureWorkflow(),
         accountContext: { id: "account-1", projectId: "project-1", name: "A" },
       },
+      1,
     );
     expect(observation.securityTags).toContain("out-of-scope-redirect");
     expect(observation.captureErrors).toContainEqual(
@@ -86,6 +94,7 @@ describe("HAR normalization", () => {
         accountContext: { id: "account-1", projectId: "project-1", name: "A" },
         activeMarker: marker,
       },
+      1,
     );
     expect(observation.actionMarkerId).toBe(marker.id);
   });

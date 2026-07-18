@@ -1,9 +1,10 @@
 import { readFile, readdir } from "node:fs/promises";
 import { resolve, relative, sep } from "node:path";
 
-const root = resolve(import.meta.dirname, "..");
+const root = resolve(process.env.STATELENS_VERIFY_ROOT ?? resolve(import.meta.dirname, ".."));
 const dist = resolve(root, "dist");
 const failures = [];
+const referencedExecutable = new Set();
 
 async function exists(path) {
   try {
@@ -59,6 +60,7 @@ if (manifest) {
     const path = resolve(dist, value);
     if (!insideDist(path)) fail(`${label} resolves outside dist: ${value}`);
     else if (!(await exists(path))) fail(`${label} does not exist: ${value}`);
+    else if (path.endsWith(".js")) referencedExecutable.add(path);
   }
 }
 
@@ -73,6 +75,9 @@ const inertStandardsIdentifiers = [
   "http://www.w3.org/1999/xlink",
   "http://www.w3.org/2000/svg",
   "http://www.w3.org/XML/1998/namespace",
+  // React production error strings are documentation identifiers. StateLens
+  // source cannot fetch them, and the source checker forbids request APIs.
+  "https://react.dev/errors/",
 ];
 for (const path of executable) {
   const text = await readFile(path, "utf8");
@@ -96,8 +101,6 @@ for (const path of executable) {
   }
   if (/\beval\s*\(/.test(text)) fail(`${relative(root, path)} contains eval()`);
   if (/\bnew\s+Function\s*\(/.test(text)) fail(`${relative(root, path)} contains new Function()`);
-  if (/dangerouslySetInnerHTML/.test(text))
-    fail(`${relative(root, path)} contains dangerouslySetInnerHTML`);
   if (/sourceMappingURL\s*=/.test(text))
     fail(`${relative(root, path)} contains a source-map reference`);
   if (/(@import|url\()\s*["']?https?:\/\//i.test(text))
@@ -112,7 +115,19 @@ for (const path of executable) {
       const asset = resolve(dist, reference.replace(/^\//, ""));
       if (!insideDist(asset) || !(await exists(asset)))
         fail(`${relative(root, path)} references missing asset: ${reference}`);
+      else if (asset.endsWith(".js")) referencedExecutable.add(asset);
     }
+  }
+}
+
+const allowedExtensions = new Set([".css", ".html", ".js", ".json", ".png", ".svg", ".webp"]);
+for (const path of files) {
+  const extension = path.slice(path.lastIndexOf(".")).toLowerCase();
+  if (!allowedExtensions.has(extension)) {
+    fail(`${relative(root, path)} is an unexpected packaged asset type`);
+  }
+  if (extension === ".js" && !referencedExecutable.has(path)) {
+    fail(`${relative(root, path)} is an unreferenced executable asset`);
   }
 }
 

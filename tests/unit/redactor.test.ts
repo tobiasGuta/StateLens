@@ -64,6 +64,11 @@ describe("secret redaction", () => {
     expect(new URL(result.value).searchParams.get("state")).toBe("visible");
   });
 
+  it("does not classify the deterministic session sequence as a secret", () => {
+    const result = redactStructuredValue({ sessionSequence: 7, sessionId: "secret" });
+    expect(result.value).toEqual({ sessionSequence: 7, sessionId: "[REDACTED]" });
+  });
+
   it("supports a valid custom redaction pattern", () => {
     const result = redactText("customer-code=ABC-123", ["ABC-[0-9]+"]);
     expect(result.value).toBe("customer-code=[REDACTED]");

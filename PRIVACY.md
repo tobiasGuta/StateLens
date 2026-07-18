@@ -24,9 +24,13 @@ Recording requires an explicit enabled scope rule. StateLens checks scope before
 
 Oversized, unsupported, binary, or base64 bodies are omitted. Size, state, reason, and a cryptographic hash are retained when practical. Multipart upload content is not stored automatically.
 
+Separate duplicate and concurrent request events are intentionally preserved because repetition can be material evidence. This may increase local IndexedDB use, so each duplicate counts toward the configured workflow observation limit. Exact redelivery of the same Chrome event object is suppressed within a session.
+
 ## User control
 
 Users choose when recording starts and stops, what projects exist, what is exported, and when local data is deleted. Export initiation and purge are independent actions. An initiated download is not treated as proof that a file was saved, and purge never claims that a backup exists. Purge requires the exact project name and explicit confirmation.
+
+Workflow recovery state, interruption timestamps, session sequence numbers, and reconciliation results remain local in the same extension-controlled IndexedDB. Recovery introduces no cloud service, telemetry, target request, or additional Chrome permission. Evidence remains exportable during finalization recovery, while destructive purge is blocked.
 
 Removing the extension through `chrome://extensions` removes extension-controlled browser storage according to Chrome's behavior. Protect exported files separately; they are outside StateLens after download.
 

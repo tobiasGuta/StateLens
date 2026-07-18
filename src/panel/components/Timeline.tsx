@@ -8,22 +8,32 @@ interface TimelineProps {
 }
 
 type TimelineEntry =
-  | { type: "marker"; timestamp: string; marker: ActionMarker }
-  | { type: "observation"; timestamp: string; observation: RequestObservation };
+  | { type: "marker"; timestamp: string; sequence: 0; marker: ActionMarker }
+  | {
+      type: "observation";
+      timestamp: string;
+      sequence: number;
+      observation: RequestObservation;
+    };
 
 export function Timeline({ observations, markers, selectedId, onSelect }: TimelineProps) {
   const entries: TimelineEntry[] = [
     ...markers.map((marker): TimelineEntry => ({
       type: "marker",
       timestamp: marker.startedAt,
+      sequence: 0,
       marker,
     })),
     ...observations.map((observation): TimelineEntry => ({
       type: "observation",
       timestamp: observation.timestamp,
+      sequence: observation.sessionSequence,
       observation,
     })),
-  ].sort((left, right) => left.timestamp.localeCompare(right.timestamp));
+  ].sort((left, right) => {
+    const timestampOrder = left.timestamp.localeCompare(right.timestamp);
+    return timestampOrder || left.sequence - right.sequence;
+  });
 
   if (entries.length === 0)
     return (
@@ -65,7 +75,7 @@ export function Timeline({ observations, markers, selectedId, onSelect }: Timeli
               {item.responseStatus}
             </span>
             <small>
-              {item.host} · {item.durationMs.toFixed(0)} ms
+              #{item.sessionSequence} · {item.host} · {item.durationMs.toFixed(0)} ms
             </small>
             {item.redactionStatus === "redacted" && <span className="pill">redacted</span>}
             {item.truncationStatus !== "none" && <span className="pill warn">limited</span>}

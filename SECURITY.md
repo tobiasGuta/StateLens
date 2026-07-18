@@ -45,6 +45,18 @@ Default limits are 512 KB per request body, 1 MB per response body, JSON depth 3
 
 Recording cannot start without an enabled rule. Exact-host and subdomain matching use parsed hostname label boundaries, not string suffixes. URL-prefix matching pins scheme, effective port, origin, and a path boundary. Scope is checked before `getContent`; redirects to a nonmatching host are flagged. StateLens never expands scope automatically.
 
+The parser preserves whether a port was explicitly supplied before the browser `URL` implementation normalizes it away. Scheme-only host rules do not pin a port, while `https://host:443`, `http://host:80`, and non-default explicit ports require the exact effective request port. DNS names, localhost, IPv4, and bracketed IPv6 are parsed without userinfo, path, query, or fragment ambiguity.
+
+### Duplicate traffic suppression hides evidence
+
+Semantic deduplication can conceal retries, repeated submissions, or concurrent operations with identical visible HAR values. StateLens therefore suppresses only repeated delivery of the exact same Chrome event object within one recording session. Separate objects are retained, assigned monotonic session sequence numbers, and each consumes observation capacity.
+
+### Interrupted capture and finalization failure
+
+The collector stops before workflow finalization. Finalization atomically reloads the stored workflow, reconciles observation IDs from the observation store, ends open markers, and writes completion. A failed transaction leaves the stored recording state intact and puts the UI into a blocking recovery state with the original context, drain summary, marker context, and error.
+
+On startup, recording workflows without a live collector are treated as interrupted and never resumed automatically. Finalizing an interruption records local recovery metadata. Non-empty interrupted workflows cannot be casually deleted, and purge remains blocked while unresolved recording evidence exists.
+
 ### Exporting unredacted credentials
 
 Headers and structured values are redacted before persistence. Query token fields are replaced. A final recursive redaction pass runs during JSON export and removes the project HMAC salt. Filenames are normalized and restricted to safe characters. The MVP deliberately has no raw-secret reveal or unredacted export path.
@@ -70,6 +82,8 @@ Records are checked with strict Zod schemas on read. Invalid records are isolate
 ### Unsafe code execution and request mutation
 
 The Manifest V3 content-security policy permits only packaged scripts and disables objects and base-URI changes. StateLens uses no `eval`, dynamic code generation, remote script, content script, debugger permission, or target-request API. It never replays or modifies a request.
+
+StateLens-owned source is scanned separately from generated dependency code. The production build does not rewrite React or other vendor chunks. Distribution verification checks manifest permissions, CSP, packaged assets, HTML/CSS resource references, source maps, and unexpected remote URLs. Its allowlist contains only documented inert React documentation strings and W3C/JSON-Schema namespace identifiers; it does not allow those hosts as executable resource sources.
 
 ## Secure development practices
 

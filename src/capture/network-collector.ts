@@ -1,9 +1,4 @@
-import {
-  captureDeduplicationKey,
-  normalizeHarEntry,
-  type HarEntryLike,
-  type ResponseContent,
-} from "./har-normalizer";
+import { normalizeHarEntry, type HarEntryLike, type ResponseContent } from "./har-normalizer";
 import { validateRedirectScope, validateUrlScope } from "../security/scope-validator";
 import type {
   CaptureContext,
@@ -27,6 +22,7 @@ interface CollectorCallbacks {
 interface RequestTask {
   stage: "capturing" | "committing" | "settled";
   timedOut: boolean;
+  reservationActive: boolean;
   promise: Promise<void>;
 }
 
@@ -35,14 +31,16 @@ interface RecordingSession {
   generation: number;
   state: "recording" | "stopping";
   callbacks: CollectorCallbacks;
-  seen: Set<string>;
+  seenRequestObjects: WeakSet<object>;
   ignoredCount: number;
   ignoredHostnames: Set<string>;
   tasks: Set<RequestTask>;
   completed: number;
   timedOut: number;
   discarded: number;
+  failed: number;
   reservedObservations: number;
+  nextSequence: number;
   limitTriggered: boolean;
   stopPromise?: Promise<CaptureDrainSummary>;
 }
@@ -116,7 +114,13 @@ export class NetworkCollector {
   private readonly listener = (value: unknown): void => {
     const session = this.activeSession;
     if (!session || session.state !== "recording" || !isDevtoolsRequest(value)) return;
-    const task = { stage: "capturing", timedOut: false } as RequestTask;
+    if (session.seenRequestObjects.has(value)) return;
+    session.seenRequestObjects.add(value);
+    const task = {
+      stage: "capturing",
+      timedOut: false,
+      reservationActive: false,
+    } as RequestTask;
     task.promise = this.handleRequest(value, session, task).finally(() => {
       task.stage = "settled";
     });
@@ -141,14 +145,16 @@ export class NetworkCollector {
       generation: this.generation,
       state: "recording",
       callbacks,
-      seen: new Set(),
+      seenRequestObjects: new WeakSet(),
       ignoredCount: 0,
       ignoredHostnames: new Set(),
       tasks: new Set(),
       completed: 0,
       timedOut: 0,
       discarded: 0,
+      failed: 0,
       reservedObservations: context.workflow.observationIds.length,
+      nextSequence: 1,
       limitTriggered: false,
     };
     this.activeSession = session;
@@ -222,6 +228,8 @@ export class NetworkCollector {
       completed: session.completed,
       timedOut: session.timedOut,
       discarded: session.discarded,
+      failed: session.failed,
+      ignoredOutOfScope: session.ignoredCount,
     };
   }
 
@@ -249,9 +257,6 @@ export class NetworkCollector {
       return;
     }
 
-    const key = captureDeduplicationKey(value);
-    if (session.seen.has(key)) return;
-    session.seen.add(key);
     if (
       session.reservedObservations >= context.project.settings.limits.maxObservationsPerWorkflow
     ) {
@@ -270,18 +275,36 @@ export class NetworkCollector {
       return this.discard(session, task);
     }
     session.reservedObservations += 1;
+    task.reservationActive = true;
+    const sessionSequence = session.nextSequence;
+    session.nextSequence += 1;
 
     if (!this.isCurrent(session, task)) return this.discard(session, task);
     const responseContent = await getResponseContent(value, this.responseContentTimeoutMs);
     if (!this.isCurrent(session, task)) return this.discard(session, task);
 
+    let observation: RequestObservation;
     try {
-      const observation = await normalizeHarEntry(value, responseContent, context);
-      if (!this.isCurrent(session, task)) return this.discard(session, task);
-      task.stage = "committing";
+      observation = await normalizeHarEntry(value, responseContent, context, sessionSequence);
+    } catch (error) {
+      this.releaseReservation(session, task);
+      if (this.isCurrent(session, task)) {
+        this.discard(session, task);
+        session.callbacks.onError(
+          error instanceof Error ? error.message : "Failed to normalize request",
+          session.id,
+        );
+      }
+      return;
+    }
+    if (!this.isCurrent(session, task)) return this.discard(session, task);
+    task.stage = "committing";
+    try {
       await session.callbacks.onObservation(observation, session.id);
       session.completed += 1;
     } catch (error) {
+      session.failed += 1;
+      this.releaseReservation(session, task);
       if (this.isCurrent(session, task)) {
         session.callbacks.onError(
           error instanceof Error ? error.message : "Failed to capture request",
@@ -294,8 +317,21 @@ export class NetworkCollector {
   private discard(session: RecordingSession, task: RequestTask): void {
     if (!task.timedOut) session.discarded += 1;
   }
+
+  private releaseReservation(session: RecordingSession, task: RequestTask): void {
+    if (!task.reservationActive) return;
+    task.reservationActive = false;
+    session.reservedObservations = Math.max(0, session.reservedObservations - 1);
+  }
 }
 
 function emptyDrainSummary(): CaptureDrainSummary {
-  return { sessionId: "none", completed: 0, timedOut: 0, discarded: 0 };
+  return {
+    sessionId: "none",
+    completed: 0,
+    timedOut: 0,
+    discarded: 0,
+    failed: 0,
+    ignoredOutOfScope: 0,
+  };
 }

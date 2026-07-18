@@ -1,11 +1,12 @@
 import { useState } from "react";
-import type { ExportReceipt, ProjectRecordCounts } from "../../shared/types";
+import type { CaptureState, ExportReceipt, ProjectRecordCounts } from "../../shared/types";
 import { useAsyncAction } from "../hooks/use-async-action";
 
 interface EvidenceActionsProps {
   projectName: string;
   counts: ProjectRecordCounts;
-  captureState: "idle" | "recording" | "stopping";
+  captureState: CaptureState;
+  purgeBlocked: boolean;
   onExport: () => Promise<ExportReceipt>;
   onPurge: (confirmationName: string) => Promise<void>;
   onError: (message: string) => void;
@@ -17,7 +18,9 @@ export function EvidenceActions(props: EvidenceActionsProps) {
   const [showPurge, setShowPurge] = useState(false);
   const [confirmationName, setConfirmationName] = useState("");
   const action = useAsyncAction(props.onError, props.onActionStart);
-  const locked = props.captureState !== "idle" || action.submitting;
+  const exportLocked =
+    props.captureState === "recording" || props.captureState === "stopping" || action.submitting;
+  const purgeLocked = props.captureState !== "idle" || props.purgeBlocked || action.submitting;
 
   return (
     <section className="card evidence-card">
@@ -28,7 +31,7 @@ export function EvidenceActions(props: EvidenceActionsProps) {
       </p>
       <button
         className="primary"
-        disabled={locked}
+        disabled={exportLocked}
         onClick={() =>
           action.run(async () => {
             setReceipt(await props.onExport());
@@ -67,7 +70,7 @@ export function EvidenceActions(props: EvidenceActionsProps) {
         <dd>{props.counts.observations}</dd>
       </dl>
       {!showPurge ? (
-        <button className="danger" disabled={locked} onClick={() => setShowPurge(true)}>
+        <button className="danger" disabled={purgeLocked} onClick={() => setShowPurge(true)}>
           Begin purge confirmation
         </button>
       ) : (
@@ -77,7 +80,7 @@ export function EvidenceActions(props: EvidenceActionsProps) {
             <input
               value={confirmationName}
               onChange={(event) => setConfirmationName(event.target.value)}
-              disabled={locked}
+              disabled={purgeLocked}
             />
           </label>
           <p className="danger-copy">This permanently deletes the listed local records.</p>
@@ -95,7 +98,7 @@ export function EvidenceActions(props: EvidenceActionsProps) {
             <button
               type="button"
               className="danger"
-              disabled={locked || confirmationName !== props.projectName}
+              disabled={purgeLocked || confirmationName !== props.projectName}
               onClick={() => action.run(() => props.onPurge(confirmationName))}
             >
               Permanently purge project

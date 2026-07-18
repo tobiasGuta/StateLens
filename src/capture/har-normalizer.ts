@@ -35,19 +35,11 @@ export interface ResponseContent {
   errorCode?: string;
 }
 
-export function captureDeduplicationKey(entry: HarEntryLike): string {
-  return [
-    entry.startedDateTime ?? "unknown-time",
-    entry.request.method.toUpperCase(),
-    entry.request.url,
-    entry.response.status,
-  ].join("|");
-}
-
 export async function normalizeHarEntry(
   entry: HarEntryLike,
   responseContent: ResponseContent,
   context: CaptureContext,
+  sessionSequence: number,
 ): Promise<RequestObservation> {
   const scopeValidation = validateUrlScope(entry.request.url, context.project.scope);
   if (!scopeValidation.allowed) throw new Error("Out-of-scope entries must not be normalized");
@@ -113,6 +105,7 @@ export async function normalizeHarEntry(
     workflowId: context.workflow.id,
     accountContextId: context.accountContext.id,
     ...(context.activeMarker ? { actionMarkerId: context.activeMarker.id } : {}),
+    sessionSequence,
     timestamp: entry.startedDateTime ?? new Date().toISOString(),
     method: entry.request.method.toUpperCase(),
     url: sanitizedUrl.value,

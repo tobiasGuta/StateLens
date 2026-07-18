@@ -40,6 +40,8 @@ export function ObservationDetail({
       <div className="detail-content">
         {tab === "overview" && (
           <dl>
+            <dt>Session sequence</dt>
+            <dd>{observation.sessionSequence}</dd>
             <dt>URL</dt>
             <dd className="break">{observation.url}</dd>
             <dt>Status</dt>

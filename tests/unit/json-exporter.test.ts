@@ -4,7 +4,7 @@ import {
   initiateSanitizedJsonExport,
   sanitizeFilename,
 } from "../../src/export/json-exporter";
-import { fixtureProject, fixtureWorkflow } from "../fixtures/records";
+import { fixtureObservation, fixtureProject, fixtureWorkflow } from "../fixtures/records";
 
 describe("sanitized JSON export", () => {
   afterEach(() => vi.restoreAllMocks());
@@ -25,6 +25,20 @@ describe("sanitized JSON export", () => {
   it("sanitizes unsafe filenames", () => {
     expect(sanitizeFilename("../../ My Target : Evidence ")).toBe("My-Target-Evidence");
     expect(sanitizeFilename("***")).toBe("statelens-project");
+  });
+
+  it("retains observation session sequence numbers in sanitized exports", () => {
+    const output = createSanitizedJsonExport({
+      exportedAt: "2026-07-18T12:00:00.000Z",
+      formatVersion: 1,
+      project: fixtureProject(),
+      accountContexts: [],
+      workflows: [fixtureWorkflow()],
+      actionMarkers: [],
+      observations: [fixtureObservation({ sessionSequence: 7 })],
+    });
+    const parsed = JSON.parse(output) as { observations: { sessionSequence: number }[] };
+    expect(parsed.observations[0]?.sessionSequence).toBe(7);
   });
 
   it("reports the hash and size of the exact initiated bytes", async () => {

@@ -6,6 +6,7 @@ import { clampProjectLimits } from "../security/size-limits";
 import { normalizeScopeRuleValue } from "../security/scope-validator";
 import { createProjectSalt } from "../security/token-fingerprint";
 import { StateLensRepository } from "../storage/database";
+import { compareObservations } from "../shared/observation-order";
 import {
   defaultProjectLimits,
   type AccountContext,
@@ -19,10 +20,13 @@ import {
 import type {
   CaptureContext,
   CaptureDrainSummary,
+  CaptureState,
   ExportReceipt,
   IgnoredRequestSummary,
+  InterruptedWorkflowCandidate,
   ProjectBundle,
   ProjectRecordCounts,
+  WorkflowFinalizationResult,
 } from "../shared/types";
 import { Dashboard } from "./components/Dashboard";
 import { EvidenceActions } from "./components/EvidenceActions";
@@ -30,8 +34,14 @@ import { LimitSettings } from "./components/LimitSettings";
 import { ObservationDetail } from "./components/ObservationDetail";
 import { ProjectSetup } from "./components/ProjectSetup";
 import { RecorderBar } from "./components/RecorderBar";
+import { FinalizationRecoveryPanel, InterruptedWorkflowPanel } from "./components/RecoveryPanel";
 import { Sidebar, type PageName } from "./components/Sidebar";
 import { Timeline } from "./components/Timeline";
+import {
+  attemptWorkflowFinalization,
+  type FinalizationRecoveryState,
+} from "./finalization-recovery";
+import { mergeEndedMarkers, mergeMarkerActivation } from "./marker-state";
 
 export default function App() {
   const [repository, setRepository] = useState<StateLensRepository>();
@@ -51,8 +61,12 @@ export default function App() {
   const [recoverableErrors, setRecoverableErrors] = useState(0);
   const [message, setMessage] = useState<string>();
   const [error, setError] = useState<string>();
-  const [captureState, setCaptureState] = useState<"idle" | "recording" | "stopping">("idle");
+  const [captureState, setCaptureState] = useState<CaptureState>("idle");
   const [lastDrainSummary, setLastDrainSummary] = useState<CaptureDrainSummary>();
+  const [finalizationRecovery, setFinalizationRecovery] = useState<FinalizationRecoveryState>();
+  const [interruptedWorkflows, setInterruptedWorkflows] = useState<InterruptedWorkflowCandidate[]>(
+    [],
+  );
   const [recordCounts, setRecordCounts] = useState<ProjectRecordCounts>({
     projects: 0,
     accountContexts: 0,
@@ -68,6 +82,9 @@ export default function App() {
   const activeProject = projects.find((project) => project.id === activeProjectId);
   const activeAccount = accounts.find((account) => account.id === activeAccountId);
   const activeWorkflow = workflows.find((workflow) => workflow.id === activeWorkflowId);
+  const interruptedCandidate =
+    interruptedWorkflows.find((candidate) => candidate.workflow.id === activeWorkflowId) ??
+    interruptedWorkflows[0];
 
   useEffect(() => {
     if (captureState !== "idle") return;
@@ -90,10 +107,21 @@ export default function App() {
       .then(async (opened) => {
         if (!alive) return opened.close();
         setRepository(opened);
-        const loadedProjects = await opened.listProjects();
+        const [loadedProjects, interrupted] = await Promise.all([
+          opened.listProjects(),
+          opened.listInterruptedWorkflows(),
+        ]);
         setProjects(loadedProjects);
+        setInterruptedWorkflows(interrupted);
         setRecoverableErrors((await opened.listRecoverableErrors()).length);
-        if (loadedProjects[0]) setActiveProjectId(loadedProjects[0].id);
+        const firstInterrupted = interrupted[0]?.workflow;
+        if (firstInterrupted) {
+          setActiveProjectId(firstInterrupted.projectId);
+          setActiveAccountId(firstInterrupted.accountContextId);
+          setActiveWorkflowId(firstInterrupted.id);
+        } else if (loadedProjects[0]) {
+          setActiveProjectId(loadedProjects[0].id);
+        }
       })
       .catch((cause: unknown) => {
         setError(`Local database could not be opened: ${errorMessage(cause)}`);
@@ -151,7 +179,7 @@ export default function App() {
     ])
       .then(([loadedObservations, loadedMarkers]) => {
         if (!alive) return;
-        setObservations(loadedObservations.sort((a, b) => a.timestamp.localeCompare(b.timestamp)));
+        setObservations(loadedObservations.sort(compareObservations));
         setMarkers(loadedMarkers.sort((a, b) => a.startedAt.localeCompare(b.startedAt)));
       })
       .catch((cause: unknown) => setError(errorMessage(cause)));
@@ -201,6 +229,9 @@ export default function App() {
 
   async function addScope(rule: Omit<ScopeRule, "id" | "enabled">): Promise<void> {
     if (!repository || !activeProject) return;
+    if (captureState !== "idle") {
+      throw new Error("Resolve the active recording or finalization recovery before editing scope");
+    }
     const normalizedRule = { ...rule, value: normalizeScopeRuleValue(rule.type, rule.value) };
     const updated: Project = {
       ...activeProject,
@@ -299,7 +330,11 @@ export default function App() {
           );
           if (captureContextRef.current)
             captureContextRef.current = { ...captureContextRef.current, workflow: storedWorkflow };
-          await refreshStorage();
+          try {
+            await refreshStorage();
+          } catch (cause) {
+            setError(`Observation stored, but storage metrics failed: ${errorMessage(cause)}`);
+          }
         },
         onIgnored: (summary, handlerSessionId) => {
           if (recordingSessionIdRef.current === handlerSessionId) setIgnored(summary);
@@ -338,53 +373,153 @@ export default function App() {
     if (stopPromiseRef.current) return stopPromiseRef.current;
     if (!repository || collectorRef.current.getState() === "idle") return Promise.resolve();
     const sessionId = recordingSessionIdRef.current;
+    const startingContext = captureContextRef.current;
+    if (!startingContext) return Promise.reject(new Error("Recording context is unavailable"));
     setCaptureState("stopping");
     const stopping = (async () => {
       const summary = await collectorRef.current.stop();
-      const currentContext = captureContextRef.current;
-      const workflowToStop = currentContext?.workflow;
-      if (!currentContext || !workflowToStop || recordingSessionIdRef.current !== sessionId) return;
-      if (currentContext.activeMarker) {
-        const ended = await repository.endActionMarker(
-          currentContext.activeMarker.id,
-          workflowToStop.id,
-        );
-        setMarkers((current) => current.map((item) => (item.id === ended.id ? ended : item)));
-      }
-      const updated: Workflow = {
-        ...workflowToStop,
-        status: "completed",
-        endedAt: new Date().toISOString(),
-      };
-      await repository.putWorkflow(updated);
-      if (recordingSessionIdRef.current !== sessionId) return;
-      setWorkflows((current) => current.map((item) => (item.id === updated.id ? updated : item)));
-      setActiveMarker(undefined);
-      captureContextRef.current = {
-        project: currentContext.project,
-        workflow: updated,
-        accountContext: currentContext.accountContext,
-      };
       setLastDrainSummary(summary);
-      setMessage(
-        `Recording stopped: ${summary.completed} completed, ${summary.timedOut} timed out, ${summary.discarded} discarded.`,
+      const currentContext = captureContextRef.current ?? startingContext;
+      const endedAt = new Date().toISOString();
+      const attempt = await attemptWorkflowFinalization(
+        repository,
+        currentContext,
+        summary,
+        endedAt,
       );
-      recordingSessionIdRef.current = undefined;
-      setCaptureState("idle");
-    })()
-      .catch((cause: unknown) => {
-        setError(`Recording stop failed: ${errorMessage(cause)}`);
-        throw cause;
-      })
-      .finally(() => {
-        if (recordingSessionIdRef.current === sessionId) {
-          recordingSessionIdRef.current = undefined;
-          setCaptureState("idle");
-        }
-        stopPromiseRef.current = undefined;
-      });
+      if (attempt.state === "finalization-error") {
+        setFinalizationRecovery(attempt.recovery);
+        setCaptureState("finalization-error");
+        setError(`Recording finalization failed: ${attempt.recovery.error}`);
+        throw new Error(attempt.recovery.error);
+      }
+      applySuccessfulFinalization(currentContext, attempt.result, summary, false);
+    })().finally(() => {
+      if (recordingSessionIdRef.current === sessionId) recordingSessionIdRef.current = undefined;
+      stopPromiseRef.current = undefined;
+    });
     stopPromiseRef.current = stopping;
     return stopping;
+  }
+
+  function applySuccessfulFinalization(
+    context: CaptureContext,
+    result: WorkflowFinalizationResult,
+    summary: CaptureDrainSummary,
+    interrupted: boolean,
+  ): void {
+    setWorkflows((current) =>
+      current.map((item) => (item.id === result.workflow.id ? result.workflow : item)),
+    );
+    setMarkers((current) => mergeEndedMarkers(current, result.endedMarkers));
+    setActiveMarker(undefined);
+    captureContextRef.current = {
+      project: context.project,
+      workflow: result.workflow,
+      accountContext: context.accountContext,
+    };
+    setFinalizationRecovery(undefined);
+    setCaptureState("idle");
+    setError(undefined);
+    setMessage(
+      interrupted
+        ? "Interrupted workflow finalized. Stored evidence was reconciled without resuming capture."
+        : `Recording stopped: ${summary.completed} completed, ${summary.timedOut} timed out, ${summary.discarded} discarded, ${summary.failed} failed.`,
+    );
+  }
+
+  async function retryWorkflowFinalization(): Promise<void> {
+    if (!repository || !finalizationRecovery) {
+      throw new Error("No failed workflow finalization is available to retry");
+    }
+    const attempt = await attemptWorkflowFinalization(
+      repository,
+      finalizationRecovery.context,
+      finalizationRecovery.summary,
+      finalizationRecovery.endedAt,
+    );
+    if (attempt.state === "finalization-error") {
+      setFinalizationRecovery(attempt.recovery);
+      setCaptureState("finalization-error");
+      throw new Error(attempt.recovery.error);
+    }
+    applySuccessfulFinalization(
+      finalizationRecovery.context,
+      attempt.result,
+      finalizationRecovery.summary,
+      false,
+    );
+  }
+
+  async function finalizeInterruptedWorkflow(): Promise<void> {
+    if (!repository || !interruptedCandidate) return;
+    const endedAt = new Date().toISOString();
+    const result = await repository.finalizeWorkflow(interruptedCandidate.workflow.id, {
+      endedAt,
+      interrupted: true,
+    });
+    setWorkflows((current) =>
+      current.map((item) => (item.id === result.workflow.id ? result.workflow : item)),
+    );
+    setMarkers((current) => mergeEndedMarkers(current, result.endedMarkers));
+    setActiveMarker(undefined);
+    advanceInterruptedRecovery(result.workflow.id);
+    if (captureContextRef.current?.workflow.id === result.workflow.id) {
+      captureContextRef.current = {
+        project: captureContextRef.current.project,
+        accountContext: captureContextRef.current.accountContext,
+        workflow: result.workflow,
+      };
+    }
+    setMessage(
+      "Interrupted workflow finalized. Stored observations were reconciled without resuming capture.",
+    );
+    setError(undefined);
+  }
+
+  function keepInterruptedWorkflowForReview(): void {
+    if (!interruptedCandidate) return;
+    advanceInterruptedRecovery(interruptedCandidate.workflow.id);
+    setMessage(
+      "Interrupted workflow kept for review. It remains recording in storage and cannot be resumed.",
+    );
+  }
+
+  async function discardEmptyInterruptedWorkflow(): Promise<void> {
+    if (!repository || !interruptedCandidate) return;
+    if (interruptedCandidate.observationCount !== 0) {
+      throw new Error("A non-empty interrupted workflow cannot be discarded");
+    }
+    if (
+      !window.confirm(
+        `Discard empty interrupted workflow “${interruptedCandidate.workflow.name}”? Related markers will also be deleted.`,
+      )
+    ) {
+      throw new Error("Interrupted workflow discard cancelled");
+    }
+    await repository.discardEmptyInterruptedWorkflow(interruptedCandidate.workflow.id);
+    setWorkflows((current) =>
+      current.filter((workflow) => workflow.id !== interruptedCandidate.workflow.id),
+    );
+    setMarkers([]);
+    setObservations([]);
+    advanceInterruptedRecovery(interruptedCandidate.workflow.id, true);
+    setMessage("Empty interrupted workflow discarded after explicit confirmation.");
+  }
+
+  function advanceInterruptedRecovery(resolvedWorkflowId: string, discarded = false): void {
+    const remaining = interruptedWorkflows.filter(
+      (candidate) => candidate.workflow.id !== resolvedWorkflowId,
+    );
+    setInterruptedWorkflows(remaining);
+    const next = remaining[0]?.workflow;
+    if (next) {
+      setActiveProjectId(next.projectId);
+      setActiveAccountId(next.accountContextId);
+      setActiveWorkflowId(next.id);
+    } else if (discarded && activeWorkflowId === resolvedWorkflowId) {
+      setActiveWorkflowId(undefined);
+    }
   }
 
   async function addMarker(label: string, notes?: string): Promise<void> {
@@ -397,11 +532,17 @@ export default function App() {
       throw new Error("The marker does not belong to the active recording workflow");
     }
     const marker = createActionMarker(context.workflow.id, label, notes);
-    const updated = await repository.activateActionMarker(marker, context.activeMarker?.id);
-    captureContextRef.current = { ...context, workflow: updated, activeMarker: marker };
-    setMarkers((current) => [...current, marker]);
-    setWorkflows((current) => current.map((item) => (item.id === updated.id ? updated : item)));
-    setActiveMarker(marker);
+    const result = await repository.activateActionMarker(marker, context.activeMarker?.id);
+    captureContextRef.current = {
+      ...context,
+      workflow: result.workflow,
+      activeMarker: result.activeMarker,
+    };
+    setMarkers((current) => mergeMarkerActivation(current, result));
+    setWorkflows((current) =>
+      current.map((item) => (item.id === result.workflow.id ? result.workflow : item)),
+    );
+    setActiveMarker(result.activeMarker);
   }
 
   async function endActiveMarker(): Promise<void> {
@@ -446,6 +587,9 @@ export default function App() {
   async function purgeProject(confirmationName: string): Promise<void> {
     if (!repository || !activeProject) throw new Error("Select a project before purging");
     if (captureState !== "idle") throw new Error("Stop and finish draining before purging");
+    if (workflows.some((workflow) => workflow.status === "recording")) {
+      throw new Error("Resolve interrupted workflows before purging this project");
+    }
     if (confirmationName !== activeProject.name) {
       throw new Error("Project name confirmation did not match");
     }
@@ -479,6 +623,11 @@ export default function App() {
     revealIgnoredHostnames: boolean,
   ): Promise<void> {
     if (!repository || !activeProject) return;
+    if (captureState !== "idle") {
+      throw new Error(
+        "Resolve the active recording or finalization recovery before editing settings",
+      );
+    }
     const updated: Project = {
       ...activeProject,
       updatedAt: new Date().toISOString(),
@@ -543,6 +692,24 @@ export default function App() {
               ×
             </button>
           </div>
+        )}
+        {finalizationRecovery && (
+          <FinalizationRecoveryPanel
+            error={finalizationRecovery.error}
+            summary={finalizationRecovery.summary}
+            onRetry={retryWorkflowFinalization}
+            onExport={exportProject}
+            onError={setError}
+          />
+        )}
+        {!finalizationRecovery && interruptedCandidate && (
+          <InterruptedWorkflowPanel
+            candidate={interruptedCandidate}
+            onFinalize={finalizeInterruptedWorkflow}
+            onKeep={keepInterruptedWorkflowForReview}
+            onDiscard={discardEmptyInterruptedWorkflow}
+            onError={setError}
+          />
         )}
         <RecorderBar
           workflow={activeWorkflow}
@@ -611,6 +778,7 @@ export default function App() {
                   projectName={activeProject.name}
                   counts={recordCounts}
                   captureState={captureState}
+                  purgeBlocked={workflows.some((workflow) => workflow.status === "recording")}
                   onExport={exportProject}
                   onPurge={purgeProject}
                   onError={setError}

@@ -1,6 +1,6 @@
 export const APP_NAME = "StateLens";
 export const DATABASE_NAME = "statelens";
-export const DATABASE_VERSION = 1;
+export const DATABASE_VERSION = 2;
 
 export const DEFAULT_LIMITS = {
   maxRequestBodyBytes: 512 * 1024,

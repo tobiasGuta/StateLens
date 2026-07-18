@@ -39,6 +39,27 @@ export interface CaptureDrainSummary {
   completed: number;
   timedOut: number;
   discarded: number;
+  failed: number;
+  ignoredOutOfScope: number;
+}
+
+export type CaptureState = "idle" | "recording" | "stopping" | "finalization-error";
+
+export interface MarkerActivationResult {
+  workflow: Workflow;
+  activeMarker: ActionMarker;
+  endedPreviousMarker?: ActionMarker;
+}
+
+export interface WorkflowFinalizationResult {
+  workflow: Workflow;
+  endedMarkers: ActionMarker[];
+}
+
+export interface InterruptedWorkflowCandidate {
+  workflow: Workflow;
+  observationCount: number;
+  openMarkerCount: number;
 }
 
 export interface ProjectBundle {

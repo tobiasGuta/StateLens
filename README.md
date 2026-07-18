@@ -26,6 +26,9 @@ StateLens is not an exploitation tool. The MVP does not replay requests, modify 
 - Sanitized JSON export initiation with exact byte size and SHA-256 receipt
 - Separate typed-confirmation project purge with record counts
 - Recording-session generations, response-content timeout, and bounded stop draining
+- Exact event-object duplicate suppression while preserving separate identical and concurrent requests
+- Per-session positive sequence numbers for deterministic ordering when timestamps are equal
+- Explicit workflow-finalization and interrupted-session recovery without resuming network capture
 
 Workflow comparison, identifier correlation, state inference, explainable hypotheses, Markdown evidence reports, cURL, and raw HTTP export are intentionally reserved for later phases. They are not represented as working features in this release.
 
@@ -87,6 +90,8 @@ Add at least one explicit rule:
 
 Recording stays disabled until an enabled rule exists. Similar-looking suffixes such as `example.test.evil.test` do not match `example.test`. Redirects to other hosts are flagged as out of scope.
 
+Host rules distinguish scheme-only input from an explicitly supplied port. For example, `https://example.test` allows HTTPS on any port, while `https://example.test:443` requires effective port 443 even though the browser URL parser normally hides that default port. URL-prefix rules always pin their origin, and their normalized display preserves explicitly supplied `:443` or `:80`.
+
 ### Create an account context
 
 Give the context a descriptive name such as `Anonymous`, `Account A`, `Member`, or `Organization owner`. Role and tenant labels are optional. Never enter a password, cookie, token, or other credential in account notes.
@@ -101,9 +106,15 @@ Give the context a descriptive name such as `Anonymous`, `Account A`, `Member`, 
 
 Out-of-scope requests are counted without requesting or storing their bodies. Ignored hostnames are hidden unless the project explicitly enables hostname display.
 
+Separate Chrome event objects are preserved even when their timestamp, method, URL, status, and POST body are identical. Only delivery of the exact same event object twice in one session is suppressed. Each admitted in-scope request receives a `sessionSequence` starting at 1; this sequence remains stable even if concurrent response bodies finish out of order.
+
+Stopping drains admitted work before atomically reconciling stored observations, ending open markers, and completing the workflow. If final persistence fails, StateLens enters a blocking finalization-recovery state. The analyst can retry or export evidence, but cannot start another recording, switch capture context, edit scope, or purge until finalization succeeds.
+
+On startup, a stored `recording` workflow with no live collector is treated as interrupted. StateLens never resumes it automatically. The analyst may finalize it as interrupted, keep it for review, or explicitly discard it only when it has no observations.
+
 ### Review evidence
 
-Open **Timeline** and select a request. The detail pane exposes metadata, sanitized headers, parsed data, redaction status, body-limit decisions, hashes, and capture limitations. A missing or omitted body is evidence about capture availability, not evidence that the server returned no content.
+Open **Timeline** and select a request. Equal timestamps are ordered by `sessionSequence`, which is also visible in request details and retained in exports. The detail pane exposes metadata, sanitized headers, parsed data, redaction status, body-limit decisions, hashes, and capture limitations. A missing or omitted body is evidence about capture availability, not evidence that the server returned no content.
 
 ### Export or delete
 
@@ -144,6 +155,8 @@ The **Project Settings** page displays this permission posture and explains how 
 - Manual browser loading and target-page capture must be verified for each supported Chrome release.
 - Chrome can make response content unavailable; StateLens records the limitation without inventing content.
 - Response-content retrieval has a bounded internal timeout, and stopping uses a bounded drain before final workflow completion.
+- Preserving legitimate duplicate traffic can increase local storage use; workflow observation limits still apply to every separate event.
+- Interrupted or finalization-error workflows require explicit local recovery and cannot be silently resumed.
 - Compressed responses are handled only as Chrome exposes them through `getContent`.
 - Uploaded binary content is omitted; only multipart field/file metadata is retained.
 - Ignored-request counters are session state and are not persisted as sensitive traffic records.
@@ -161,6 +174,8 @@ The **Project Settings** page displays this permission posture and explains how 
 6. Broader synthetic browser integration coverage
 
 Every future candidate will remain unverified by default, include evidence observation IDs and human-readable reasons, and avoid vulnerability severity labels.
+
+Production builds use the normal React output without post-build vendor rewriting. Source verification applies strict rules to StateLens-owned code; distribution verification separately checks manifest policy and actual external resource-loading paths while narrowly recognizing inert React, W3C, and JSON-Schema identifier strings.
 
 ## Responsible use
 

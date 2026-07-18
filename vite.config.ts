@@ -3,23 +3,7 @@ import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 
 export default defineConfig({
-  plugins: [
-    react(),
-    {
-      name: "harden-production-bundle",
-      generateBundle(_options, bundle) {
-        for (const chunk of Object.values(bundle)) {
-          if (chunk.type === "chunk") {
-            chunk.code = chunk.code
-              .replaceAll("https://react.dev/errors/", "React error ")
-              // StateLens never uses React's raw-HTML escape hatch. Removing the
-              // dispatch key keeps that capability absent from packaged code.
-              .replaceAll("dangerouslySetInnerHTML", "statelensRawHtmlDisabled");
-          }
-        }
-      },
-    },
-  ],
+  plugins: [react()],
   build: {
     outDir: "dist",
     emptyOutDir: true,

@@ -89,6 +89,14 @@ export const workflowSchema = z
     endedAt: isoDate.optional(),
     observationIds: z.array(nonEmpty),
     markerIds: z.array(nonEmpty),
+    recovery: z
+      .object({
+        reason: z.literal("capture-interrupted"),
+        detectedAt: isoDate,
+        finalizedAt: isoDate.optional(),
+      })
+      .strict()
+      .optional(),
   })
   .strict();
 
@@ -160,6 +168,7 @@ export const requestObservationSchema = z
     workflowId: nonEmpty,
     accountContextId: nonEmpty,
     actionMarkerId: nonEmpty.optional(),
+    sessionSequence: z.number().int().positive(),
     timestamp: isoDate,
     method: nonEmpty,
     url: z.string().url(),

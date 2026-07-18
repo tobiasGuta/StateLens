@@ -1,4 +1,4 @@
-import { openDB, type DBSchema, type IDBPDatabase } from "idb";
+import { openDB, type DBSchema, type IDBPDatabase, type IDBPTransaction } from "idb";
 import { DATABASE_NAME, DATABASE_VERSION } from "../shared/constants";
 import {
   accountContextSchema,
@@ -15,7 +15,13 @@ import {
   type Workflow,
 } from "../shared/schemas";
 import type { ZodType } from "zod";
-import type { ProjectRecordCounts } from "../shared/types";
+import { compareObservations } from "../shared/observation-order";
+import type {
+  InterruptedWorkflowCandidate,
+  MarkerActivationResult,
+  ProjectRecordCounts,
+  WorkflowFinalizationResult,
+} from "../shared/types";
 
 interface StateLensDatabase extends DBSchema {
   projects: { key: string; value: Project };
@@ -41,12 +47,70 @@ interface StateLensDatabase extends DBSchema {
 type ValidatedStore =
   "projects" | "accountContexts" | "workflows" | "actionMarkers" | "observations";
 
+type UpgradeTransaction = IDBPTransaction<
+  StateLensDatabase,
+  ArrayLike<
+    | "projects"
+    | "accountContexts"
+    | "workflows"
+    | "actionMarkers"
+    | "observations"
+    | "recoverableErrors"
+  >,
+  "versionchange"
+>;
+
+async function migrateObservationsToVersionTwo(transaction: UpgradeTransaction): Promise<void> {
+  const observationStore = transaction.objectStore("observations");
+  const errorStore = transaction.objectStore("recoverableErrors");
+  const rawObservations = (await observationStore.getAll()) as unknown[];
+  const grouped = new Map<string, Record<string, unknown>[]>();
+  for (const value of rawObservations) {
+    if (!value || typeof value !== "object") continue;
+    const record = value as Record<string, unknown>;
+    const workflowId = typeof record.workflowId === "string" ? record.workflowId : "";
+    const group = grouped.get(workflowId) ?? [];
+    group.push(record);
+    grouped.set(workflowId, group);
+  }
+  for (const records of grouped.values()) {
+    records.sort((left, right) => {
+      const leftTimestamp = typeof left.timestamp === "string" ? left.timestamp : "";
+      const rightTimestamp = typeof right.timestamp === "string" ? right.timestamp : "";
+      const timestampOrder = leftTimestamp.localeCompare(rightTimestamp);
+      if (timestampOrder) return timestampOrder;
+      const leftId = typeof left.id === "string" ? left.id : "";
+      const rightId = typeof right.id === "string" ? right.id : "";
+      return leftId.localeCompare(rightId);
+    });
+    for (const [index, record] of records.entries()) {
+      const migrated = { ...record, sessionSequence: index + 1 };
+      const result = requestObservationSchema.safeParse(migrated);
+      if (result.success) {
+        await observationStore.put(result.data);
+      } else {
+        await errorStore.put(
+          recoverableStorageErrorSchema.parse({
+            id: crypto.randomUUID(),
+            storeName: "observations",
+            ...(typeof record.id === "string" ? { recordId: record.id } : {}),
+            message: `Version 2 migration: ${result.error.issues
+              .map((issue) => `${issue.path.join(".")}: ${issue.message}`)
+              .join("; ")}`,
+            detectedAt: new Date().toISOString(),
+          }),
+        );
+      }
+    }
+  }
+}
+
 export class StateLensRepository {
   constructor(private readonly database: IDBPDatabase<StateLensDatabase>) {}
 
   static async open(name = DATABASE_NAME): Promise<StateLensRepository> {
     const database = await openDB<StateLensDatabase>(name, DATABASE_VERSION, {
-      upgrade(db, oldVersion) {
+      upgrade(db, oldVersion, _newVersion, transaction) {
         if (oldVersion < 1) {
           db.createObjectStore("projects", { keyPath: "id" });
           const accounts = db.createObjectStore("accountContexts", { keyPath: "id" });
@@ -61,6 +125,9 @@ export class StateLensRepository {
           observations.createIndex("workflowId", "workflowId");
           const errors = db.createObjectStore("recoverableErrors", { keyPath: "id" });
           errors.createIndex("storeName", "storeName");
+        }
+        if (oldVersion < 2) {
+          void migrateObservationsToVersionTwo(transaction).catch(() => transaction.abort());
         }
       },
     });
@@ -87,26 +154,47 @@ export class StateLensRepository {
     await this.database.put("actionMarkers", actionMarkerSchema.parse(marker));
   }
 
-  async activateActionMarker(marker: ActionMarker, previousMarkerId?: string): Promise<Workflow> {
+  async activateActionMarker(
+    marker: ActionMarker,
+    previousMarkerId?: string,
+  ): Promise<MarkerActivationResult> {
     const validMarker = actionMarkerSchema.parse(marker);
+    if (previousMarkerId === validMarker.id) {
+      throw new Error("A replacement marker must have a new identity");
+    }
     const transaction = this.database.transaction(["actionMarkers", "workflows"], "readwrite");
-    const workflow = await transaction.objectStore("workflows").get(marker.workflowId);
+    const workflow = await transaction.objectStore("workflows").get(validMarker.workflowId);
     if (!workflow || workflow.status !== "recording") {
       throw new Error("Action markers can only be added to the active recording workflow");
     }
+    let endedPreviousMarker: ActionMarker | undefined;
     if (previousMarkerId) {
       const previous = await transaction.objectStore("actionMarkers").get(previousMarkerId);
-      if (previous && previous.workflowId === workflow.id && !previous.endedAt) {
-        await transaction
-          .objectStore("actionMarkers")
-          .put(actionMarkerSchema.parse({ ...previous, endedAt: marker.startedAt }));
+      if (!previous || previous.workflowId !== workflow.id) {
+        throw new Error("The previous marker does not belong to the recording workflow");
       }
+      endedPreviousMarker = actionMarkerSchema.parse({
+        ...previous,
+        endedAt: previous.endedAt ?? validMarker.startedAt,
+      });
     }
-    if (!workflow.markerIds.includes(marker.id)) workflow.markerIds.push(marker.id);
+    const updatedWorkflow = workflowSchema.parse({
+      ...workflow,
+      markerIds: workflow.markerIds.includes(validMarker.id)
+        ? workflow.markerIds
+        : [...workflow.markerIds, validMarker.id],
+    });
+    if (endedPreviousMarker) {
+      await transaction.objectStore("actionMarkers").put(endedPreviousMarker);
+    }
     await transaction.objectStore("actionMarkers").put(validMarker);
-    await transaction.objectStore("workflows").put(workflowSchema.parse(workflow));
+    await transaction.objectStore("workflows").put(updatedWorkflow);
     await transaction.done;
-    return workflow;
+    return {
+      workflow: updatedWorkflow,
+      activeMarker: validMarker,
+      ...(endedPreviousMarker ? { endedPreviousMarker } : {}),
+    };
   }
 
   async endActionMarker(markerId: string, workflowId: string): Promise<ActionMarker> {
@@ -150,6 +238,118 @@ export class StateLensRepository {
     return workflow;
   }
 
+  async getWorkflow(workflowId: string): Promise<Workflow | undefined> {
+    const value = await this.database.get("workflows", workflowId);
+    if (!value) return undefined;
+    const result = workflowSchema.safeParse(value);
+    if (result.success) return result.data;
+    await this.recordRecoverableError({
+      id: crypto.randomUUID(),
+      storeName: "workflows",
+      recordId: workflowId,
+      message: result.error.issues
+        .map((issue) => `${issue.path.join(".")}: ${issue.message}`)
+        .join("; "),
+      detectedAt: new Date().toISOString(),
+    });
+    return undefined;
+  }
+
+  async listInterruptedWorkflows(): Promise<InterruptedWorkflowCandidate[]> {
+    const workflows = (
+      await this.readValidated("workflows", await this.database.getAll("workflows"), workflowSchema)
+    ).filter((workflow) => workflow.status === "recording");
+    return Promise.all(
+      workflows.map(async (workflow) => {
+        const [observations, markers] = await Promise.all([
+          this.database.getAllFromIndex("observations", "workflowId", workflow.id),
+          this.database.getAllFromIndex("actionMarkers", "workflowId", workflow.id),
+        ]);
+        return {
+          workflow,
+          observationCount: observations.length,
+          openMarkerCount: markers.filter((marker) => !marker.endedAt).length,
+        };
+      }),
+    );
+  }
+
+  async finalizeWorkflow(
+    workflowId: string,
+    options: { endedAt: string; interrupted?: boolean },
+  ): Promise<WorkflowFinalizationResult> {
+    const transaction = this.database.transaction(
+      ["workflows", "observations", "actionMarkers"],
+      "readwrite",
+    );
+    const workflow = await transaction.objectStore("workflows").get(workflowId);
+    if (!workflow) throw new Error("Cannot finalize a missing workflow");
+    if (workflow.status !== "recording" && workflow.status !== "completed") {
+      throw new Error("Only recording or completed workflows can be finalized");
+    }
+    const observations = await transaction
+      .objectStore("observations")
+      .index("workflowId")
+      .getAll(workflowId);
+    const validObservations = observations.map((observation) =>
+      requestObservationSchema.parse(observation),
+    );
+    validObservations.sort(compareObservations);
+    const markers = await transaction
+      .objectStore("actionMarkers")
+      .index("workflowId")
+      .getAll(workflowId);
+    const validMarkers = markers.map((marker) => actionMarkerSchema.parse(marker));
+    const finalEndedAt = workflow.endedAt ?? options.endedAt;
+    const endedMarkers = validMarkers
+      .filter((marker) => !marker.endedAt)
+      .map((marker) => actionMarkerSchema.parse({ ...marker, endedAt: finalEndedAt }));
+    const updated = workflowSchema.parse({
+      ...workflow,
+      status: "completed",
+      endedAt: finalEndedAt,
+      observationIds: validObservations.map((observation) => observation.id),
+      ...(options.interrupted
+        ? {
+            recovery: {
+              reason: "capture-interrupted",
+              detectedAt: workflow.recovery?.detectedAt ?? options.endedAt,
+              finalizedAt: finalEndedAt,
+            },
+          }
+        : {}),
+    });
+    for (const marker of endedMarkers) {
+      await transaction.objectStore("actionMarkers").put(marker);
+    }
+    await transaction.objectStore("workflows").put(updated);
+    await transaction.done;
+    return { workflow: updated, endedMarkers };
+  }
+
+  async discardEmptyInterruptedWorkflow(workflowId: string): Promise<void> {
+    const transaction = this.database.transaction(
+      ["workflows", "observations", "actionMarkers"],
+      "readwrite",
+    );
+    const workflow = await transaction.objectStore("workflows").get(workflowId);
+    if (!workflow || workflow.status !== "recording") {
+      throw new Error("Only an interrupted recording workflow can be discarded");
+    }
+    const observations = await transaction
+      .objectStore("observations")
+      .index("workflowId")
+      .getAllKeys(workflowId);
+    if (observations.length > 0) {
+      throw new Error("A non-empty interrupted workflow cannot be discarded");
+    }
+    const markerStore = transaction.objectStore("actionMarkers");
+    const markerKeys = await markerStore.index("workflowId").getAllKeys(workflowId);
+    for (const key of markerKeys) await markerStore.delete(key);
+    await transaction.objectStore("workflows").delete(workflowId);
+    await transaction.done;
+  }
+
   async listProjects(): Promise<Project[]> {
     return this.readValidated("projects", await this.database.getAll("projects"), projectSchema);
   }
@@ -171,12 +371,16 @@ export class StateLensRepository {
 
   async listObservations(workflowId: string): Promise<RequestObservation[]> {
     const values = await this.database.getAllFromIndex("observations", "workflowId", workflowId);
-    return this.readValidated("observations", values, requestObservationSchema);
+    return (await this.readValidated("observations", values, requestObservationSchema)).sort(
+      compareObservations,
+    );
   }
 
   async listProjectObservations(projectId: string): Promise<RequestObservation[]> {
     const values = await this.database.getAllFromIndex("observations", "projectId", projectId);
-    return this.readValidated("observations", values, requestObservationSchema);
+    return (await this.readValidated("observations", values, requestObservationSchema)).sort(
+      compareObservations,
+    );
   }
 
   async listRecoverableErrors(): Promise<RecoverableStorageError[]> {
