@@ -1,0 +1,18 @@
+{
+  "manifest_version": 3,
+  "name": "StateLens",
+  "version": "0.1.0",
+  "description": "Business Logic and Authorization Workflow Mapper",
+  "devtools_page": "devtools.html",
+  "background": {
+    "service_worker": "service-worker.js",
+    "type": "module"
+  },
+  "permissions": [],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'none'; base-uri 'none'"
+  },
+  "action": {
+    "default_title": "Open DevTools to use StateLens"
+  }
+}
