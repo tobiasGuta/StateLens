@@ -3,6 +3,12 @@
   "name": "StateLens",
   "version": "0.1.0",
   "description": "Business Logic and Authorization Workflow Mapper",
+  "icons": {
+    "16": "icons/statelens-16.png",
+    "32": "icons/statelens-32.png",
+    "48": "icons/statelens-48.png",
+    "128": "icons/statelens-128.png"
+  },
   "devtools_page": "devtools.html",
   "background": {
     "service_worker": "service-worker.js",
@@ -13,6 +19,10 @@
     "extension_pages": "script-src 'self'; object-src 'none'; base-uri 'none'"
   },
   "action": {
-    "default_title": "Open DevTools to use StateLens"
+    "default_title": "Open DevTools to use StateLens",
+    "default_icon": {
+      "16": "icons/statelens-16.png",
+      "32": "icons/statelens-32.png"
+    }
   }
 }

@@ -18,9 +18,7 @@ export function Sidebar({
   return (
     <aside className="sidebar">
       <div className="brand">
-        <span className="brand-mark" aria-hidden="true">
-          SL
-        </span>
+        <img className="brand-mark" src="/icons/statelens-32.png" alt="" aria-hidden="true" />
         <div>
           <strong>StateLens</strong>
           <small>Workflow Mapper</small>
