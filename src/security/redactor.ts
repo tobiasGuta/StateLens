@@ -1,6 +1,7 @@
 import { PROTOTYPE_KEYS, SENSITIVE_FIELD_PATTERN } from "../shared/constants";
 import type { CapturedHeader } from "../shared/schemas";
 import { fingerprintSecret } from "./token-fingerprint";
+import { compileSafeCustomPatterns } from "./custom-redaction";
 
 const INLINE_SECRET_PATTERNS = [
   /\b(Bearer\s+)[A-Za-z0-9._~+/=-]+/gi,
@@ -9,16 +10,6 @@ const INLINE_SECRET_PATTERNS = [
   /\b(AKIA[0-9A-Z]{16})\b/g,
   /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----[\s\S]*?-----END (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/g,
 ] as const;
-
-function compileCustomPatterns(patterns: string[]): RegExp[] {
-  return patterns.flatMap((pattern) => {
-    try {
-      return [new RegExp(pattern, "gi")];
-    } catch {
-      return [];
-    }
-  });
-}
 
 export function isSensitiveField(name: string): boolean {
   const normalized = name.replace(/([a-z0-9])([A-Z])/g, "$1-$2");
@@ -74,7 +65,7 @@ export function redactText(
       return prefix ? `${prefix}[REDACTED]` : "[REDACTED]";
     });
   }
-  for (const pattern of compileCustomPatterns(customPatterns)) {
+  for (const pattern of compileSafeCustomPatterns(customPatterns)) {
     output = output.replace(pattern, () => {
       redacted = true;
       return "[REDACTED]";

@@ -32,6 +32,7 @@ export interface ResponseContent {
   content?: string;
   encoding?: string;
   error?: string;
+  errorCode?: string;
 }
 
 export function captureDeduplicationKey(entry: HarEntryLike): string {
@@ -82,7 +83,10 @@ export async function normalizeHarEntry(
   });
   const captureErrors = [...requestBody.errors, ...responseBody.errors];
   if (responseContent.error) {
-    captureErrors.push({ code: "response-content-unavailable", message: responseContent.error });
+    captureErrors.push({
+      code: responseContent.errorCode ?? "response-content-unavailable",
+      message: responseContent.error,
+    });
   }
   if (redirectValidation && !redirectValidation.allowed) {
     captureErrors.push({

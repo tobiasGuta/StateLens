@@ -29,7 +29,7 @@ export function fixtureWorkflow(overrides: Partial<Workflow> = {}): Workflow {
     projectId: "project-1",
     accountContextId: "account-1",
     name: "Invoice view",
-    status: "draft",
+    status: "recording",
     observationIds: [],
     markerIds: [],
     ...overrides,

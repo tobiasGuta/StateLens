@@ -1,5 +1,7 @@
 import { useState, type FormEvent } from "react";
 import type { Workflow } from "../../shared/schemas";
+import type { CaptureDrainSummary } from "../../shared/types";
+import { useAsyncAction } from "../hooks/use-async-action";
 
 interface RecorderBarProps {
   workflow?: Workflow | undefined;
@@ -9,17 +11,27 @@ interface RecorderBarProps {
   onStart: () => Promise<void>;
   onStop: () => Promise<void>;
   onMarker: (label: string, notes?: string) => Promise<void>;
+  onEndMarker: () => Promise<void>;
+  activeMarkerLabel?: string | undefined;
+  captureState: "idle" | "recording" | "stopping";
+  lastDrainSummary?: CaptureDrainSummary | undefined;
+  onError: (message: string) => void;
+  onActionStart: () => void;
 }
 
 export function RecorderBar(props: RecorderBarProps) {
   const [showMarker, setShowMarker] = useState(false);
-  const isRecording = props.workflow?.status === "recording";
+  const action = useAsyncAction(props.onError, props.onActionStart);
+  const isRecording = props.captureState === "recording";
+  const isStopping = props.captureState === "stopping";
   return (
     <div className={isRecording ? "recorder recording" : "recorder"}>
       <div className="recording-state">
         <span className="status-dot" />
         <div>
-          <strong>{isRecording ? "Recording" : "Recorder idle"}</strong>
+          <strong>
+            {isStopping ? "Stopping and draining" : isRecording ? "Recording" : "Recorder idle"}
+          </strong>
           <small>{props.workflow?.name ?? "Select a workflow"}</small>
         </div>
       </div>
@@ -29,28 +41,45 @@ export function RecorderBar(props: RecorderBarProps) {
         <span>{formatBytes(props.storageBytes)} local</span>
       </div>
       <div className="recorder-actions">
-        {!isRecording ? (
+        {!isRecording && !isStopping ? (
           <button
             className="primary"
             type="button"
-            disabled={!props.canRecord}
-            onClick={() => void props.onStart()}
+            disabled={!props.canRecord || action.submitting || isStopping}
+            onClick={() => action.run(props.onStart)}
           >
             Start recording
           </button>
         ) : (
-          <button className="danger" type="button" onClick={() => void props.onStop()}>
-            Stop recording
+          <button
+            className="danger"
+            type="button"
+            disabled={action.submitting || isStopping}
+            onClick={() => action.run(props.onStop)}
+          >
+            {isStopping ? "Draining…" : "Stop recording"}
           </button>
         )}
         <button
           type="button"
-          disabled={!isRecording}
+          disabled={!isRecording || action.submitting}
           onClick={() => setShowMarker((current) => !current)}
         >
           Add action marker
         </button>
       </div>
+      {props.activeMarkerLabel && isRecording && (
+        <div className="active-marker">
+          <span>Active marker: {props.activeMarkerLabel}</span>
+          <button
+            type="button"
+            disabled={action.submitting}
+            onClick={() => action.run(props.onEndMarker)}
+          >
+            End marker
+          </button>
+        </div>
+      )}
       {showMarker && isRecording && (
         <form
           className="marker-form"
@@ -61,15 +90,27 @@ export function RecorderBar(props: RecorderBarProps) {
             const notesValue = data.get("notes");
             const label = typeof labelValue === "string" ? labelValue.trim() : "";
             const notes = typeof notesValue === "string" ? notesValue.trim() : "";
-            if (label) void props.onMarker(label, notes || undefined);
-            event.currentTarget.reset();
-            setShowMarker(false);
+            const form = event.currentTarget;
+            if (label)
+              action.run(
+                () => props.onMarker(label, notes || undefined),
+                () => {
+                  form.reset();
+                  setShowMarker(false);
+                },
+              );
           }}
         >
           <input required autoFocus name="label" placeholder="Clicked Apply coupon" />
           <input name="notes" placeholder="Optional note" />
           <button type="submit">Mark now</button>
         </form>
+      )}
+      {props.lastDrainSummary && props.captureState === "idle" && (
+        <small className="drain-summary">
+          Last stop: {props.lastDrainSummary.completed} completed, {props.lastDrainSummary.timedOut}{" "}
+          timed out, {props.lastDrainSummary.discarded} discarded.
+        </small>
       )}
     </div>
   );

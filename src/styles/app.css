@@ -369,6 +369,26 @@ main {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px;
 }
+.setup-fieldset {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.active-marker {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+  color: var(--warning);
+  font-size: 12px;
+}
+.drain-summary {
+  grid-column: 1 / -1;
+  color: var(--muted);
+}
 .card {
   background: var(--panel);
   border: 1px solid var(--line);
@@ -655,6 +675,46 @@ main {
   margin: 24px 0;
   border: 0;
   border-top: 1px solid var(--line);
+}
+.export-receipt,
+.purge-counts {
+  display: grid;
+  grid-template-columns: 140px minmax(0, 1fr);
+  gap: 7px 12px;
+  margin: 16px 0;
+  padding: 12px;
+  background: #0d1620;
+  border-radius: 6px;
+  font-size: 12px;
+}
+.export-receipt dt,
+.purge-counts dt {
+  color: var(--muted);
+}
+.export-receipt dd,
+.purge-counts dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.purge-confirmation {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+  padding: 13px;
+  border: 1px solid #8e4148;
+  border-radius: 6px;
+  background: #321b20;
+}
+.purge-confirmation > div {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.danger-copy {
+  margin: 0;
+  color: #f1a5aa;
+  font-size: 12px;
 }
 @media (max-width: 980px) {
   .metric-grid {

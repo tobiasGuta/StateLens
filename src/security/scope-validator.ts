@@ -1,8 +1,16 @@
 import type { ScopeRule } from "../shared/schemas";
 import type { ScopeValidationResult } from "../shared/types";
 
+interface HostRuleConstraints {
+  hostname: string;
+  protocol?: "http:" | "https:";
+  port?: string;
+}
+
 function normalizeHostname(hostname: string): string {
-  return new URL(`https://${hostname}`).hostname.toLowerCase().replace(/\.$/, "");
+  const normalized = new URL(`https://${hostname}`).hostname.toLowerCase().replace(/\.$/, "");
+  if (!normalized) throw new Error("Scope hostname is required");
+  return normalized;
 }
 
 function defaultPort(protocol: string): string {
@@ -11,42 +19,92 @@ function defaultPort(protocol: string): string {
   return "";
 }
 
+function parseHostRule(value: string): HostRuleConstraints {
+  const trimmed = value.trim();
+  if (!trimmed) throw new Error("Scope value is required");
+  const qualified = trimmed.includes("://");
+  if (!qualified && /[/\\@?#]/.test(trimmed)) {
+    throw new Error("Unqualified host scope must contain only a hostname");
+  }
+
+  let url: URL;
+  try {
+    url = new URL(qualified ? trimmed : `https://${trimmed}`);
+  } catch {
+    throw new Error("Scope host is not a valid hostname");
+  }
+  if (qualified && url.protocol !== "http:" && url.protocol !== "https:") {
+    throw new Error("Host scope must use HTTP or HTTPS when a scheme is supplied");
+  }
+  if (url.username || url.password) throw new Error("Scope rules cannot contain user information");
+  if (url.pathname !== "/") throw new Error("Host scope cannot contain a path");
+  if (url.search) throw new Error("Host scope cannot contain a query string");
+  if (url.hash) throw new Error("Host scope cannot contain a fragment");
+
+  const hostname = normalizeHostname(url.hostname);
+  return {
+    hostname,
+    ...(qualified ? { protocol: url.protocol as "http:" | "https:" } : {}),
+    // URL normalizes explicit default ports to an empty string. This makes
+    // https://host:443 equivalent to https://host, while a non-default port pins.
+    ...(url.port ? { port: url.port } : {}),
+  };
+}
+
+function parseUrlPrefix(value: string): URL {
+  let url: URL;
+  try {
+    url = new URL(value.trim());
+  } catch {
+    throw new Error("URL-prefix scope must be a valid absolute URL");
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    throw new Error("URL-prefix scope must use HTTP or HTTPS");
+  }
+  if (url.username || url.password) throw new Error("Scope rules cannot contain user information");
+  if (url.search) throw new Error("URL-prefix scope cannot contain a query string");
+  if (url.hash) throw new Error("URL-prefix scope cannot contain a fragment");
+  url.hostname = normalizeHostname(url.hostname);
+  return url;
+}
+
+export function normalizeScopeRuleValue(type: ScopeRule["type"], value: string): string {
+  if (type === "url-prefix") {
+    const url = parseUrlPrefix(value);
+    return `${url.protocol}//${url.hostname}${url.port ? `:${url.port}` : ""}${url.pathname}`;
+  }
+  const constraints = parseHostRule(value);
+  if (!constraints.protocol) return constraints.hostname;
+  return `${constraints.protocol}//${constraints.hostname}${constraints.port ? `:${constraints.port}` : ""}`;
+}
+
 function normalizedOrigin(url: URL): string {
-  const port = url.port || defaultPort(url.protocol);
-  return `${url.protocol}//${normalizeHostname(url.hostname)}:${port}`;
+  return `${url.protocol}//${normalizeHostname(url.hostname)}:${url.port || defaultPort(url.protocol)}`;
+}
+
+function hostMatches(
+  actualHost: string,
+  expectedHost: string,
+  includeSubdomains: boolean,
+): boolean {
+  const actual = normalizeHostname(actualHost);
+  if (actual === expectedHost) return true;
+  return includeSubdomains && actual.endsWith(`.${expectedHost}`);
+}
+
+function matchesHostRule(url: URL, value: string, includeSubdomains: boolean): boolean {
+  const constraints = parseHostRule(value);
+  if (!hostMatches(url.hostname, constraints.hostname, includeSubdomains)) return false;
+  if (constraints.protocol && url.protocol !== constraints.protocol) return false;
+  if (constraints.port && url.port !== constraints.port) return false;
+  return true;
 }
 
 function matchesRule(url: URL, rule: ScopeRule): boolean {
-  if (rule.type === "exact-host") {
-    let expected: URL;
-    try {
-      expected = rule.value.includes("://")
-        ? new URL(rule.value)
-        : new URL(`https://${rule.value}`);
-    } catch {
-      return false;
-    }
-
-    const sameHost = normalizeHostname(url.hostname) === normalizeHostname(expected.hostname);
-    if (!sameHost) return false;
-
-    if (rule.value.includes("://") && url.protocol !== expected.protocol) return false;
-    if (expected.port) {
-      return (url.port || defaultPort(url.protocol)) === expected.port;
-    }
-    return true;
-  }
-
-  if (rule.type === "subdomain") {
-    const expectedHost = normalizeHostname(
-      rule.value.includes("://") ? new URL(rule.value).hostname : rule.value,
-    );
-    const actualHost = normalizeHostname(url.hostname);
-    return actualHost === expectedHost || actualHost.endsWith(`.${expectedHost}`);
-  }
-
   try {
-    const prefix = new URL(rule.value);
+    if (rule.type === "exact-host") return matchesHostRule(url, rule.value, false);
+    if (rule.type === "subdomain") return matchesHostRule(url, rule.value, true);
+    const prefix = parseUrlPrefix(rule.value);
     if (normalizedOrigin(url) !== normalizedOrigin(prefix)) return false;
     const normalizedPath = prefix.pathname.endsWith("/") ? prefix.pathname : `${prefix.pathname}/`;
     return url.pathname === prefix.pathname || url.pathname.startsWith(normalizedPath);

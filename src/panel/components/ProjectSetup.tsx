@@ -1,5 +1,6 @@
 import { useState, type FormEvent } from "react";
 import type { AccountContext, Project, ScopeRule, Workflow } from "../../shared/schemas";
+import { useAsyncAction } from "../hooks/use-async-action";
 
 interface ProjectSetupProps {
   projects: Project[];
@@ -8,6 +9,7 @@ interface ProjectSetupProps {
   workflows: Workflow[];
   activeAccountId?: string | undefined;
   activeWorkflowId?: string | undefined;
+  disabled: boolean;
   onSelectProject: (id: string) => void;
   onSelectAccount: (id: string) => void;
   onSelectWorkflow: (id: string) => void;
@@ -15,6 +17,8 @@ interface ProjectSetupProps {
   onAddScope: (rule: Omit<ScopeRule, "id" | "enabled">) => Promise<void>;
   onCreateAccount: (name: string, role?: string, tenantLabel?: string) => Promise<void>;
   onCreateWorkflow: (name: string) => Promise<void>;
+  onError: (message: string) => void;
+  onActionStart: () => void;
 }
 
 function submitValue(event: FormEvent<HTMLFormElement>, name: string): string {
@@ -24,9 +28,10 @@ function submitValue(event: FormEvent<HTMLFormElement>, name: string): string {
 
 export function ProjectSetup(props: ProjectSetupProps) {
   const [scopeType, setScopeType] = useState<ScopeRule["type"]>("exact-host");
+  const action = useAsyncAction(props.onError, props.onActionStart);
   const activeProject = props.projects.find((project) => project.id === props.activeProjectId);
   return (
-    <div className="setup-grid">
+    <fieldset className="setup-grid setup-fieldset" disabled={props.disabled || action.submitting}>
       <section className="card">
         <div className="section-heading">
           <h2>Project</h2>
@@ -50,10 +55,14 @@ export function ProjectSetup(props: ProjectSetupProps) {
         <form
           onSubmit={(event) => {
             event.preventDefault();
+            const form = event.currentTarget;
             const name = submitValue(event, "name");
             const description = submitValue(event, "description");
-            if (name) void props.onCreateProject(name, description || undefined);
-            event.currentTarget.reset();
+            if (name)
+              action.run(
+                () => props.onCreateProject(name, description || undefined),
+                () => form.reset(),
+              );
           }}
         >
           <label>
@@ -94,9 +103,13 @@ export function ProjectSetup(props: ProjectSetupProps) {
             <form
               onSubmit={(event) => {
                 event.preventDefault();
+                const form = event.currentTarget;
                 const value = submitValue(event, "value");
-                if (value) void props.onAddScope({ type: scopeType, value });
-                event.currentTarget.reset();
+                if (value)
+                  action.run(
+                    () => props.onAddScope({ type: scopeType, value }),
+                    () => form.reset(),
+                  );
               }}
             >
               <label>
@@ -150,11 +163,15 @@ export function ProjectSetup(props: ProjectSetupProps) {
         <form
           onSubmit={(event) => {
             event.preventDefault();
+            const form = event.currentTarget;
             const name = submitValue(event, "name");
             const role = submitValue(event, "role");
             const tenant = submitValue(event, "tenant");
-            if (name) void props.onCreateAccount(name, role || undefined, tenant || undefined);
-            event.currentTarget.reset();
+            if (name)
+              action.run(
+                () => props.onCreateAccount(name, role || undefined, tenant || undefined),
+                () => form.reset(),
+              );
           }}
         >
           <label>
@@ -200,9 +217,13 @@ export function ProjectSetup(props: ProjectSetupProps) {
         <form
           onSubmit={(event) => {
             event.preventDefault();
+            const form = event.currentTarget;
             const name = submitValue(event, "name");
-            if (name) void props.onCreateWorkflow(name);
-            event.currentTarget.reset();
+            if (name)
+              action.run(
+                () => props.onCreateWorkflow(name),
+                () => form.reset(),
+              );
           }}
         >
           <label>
@@ -214,6 +235,6 @@ export function ProjectSetup(props: ProjectSetupProps) {
           </button>
         </form>
       </section>
-    </div>
+    </fieldset>
   );
 }

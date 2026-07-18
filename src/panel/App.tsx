@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createActionMarker } from "../capture/action-markers";
 import { NetworkCollector } from "../capture/network-collector";
-import { createSanitizedJsonExport, downloadTextFile } from "../export/json-exporter";
+import { initiateSanitizedJsonExport } from "../export/json-exporter";
 import { clampProjectLimits } from "../security/size-limits";
+import { normalizeScopeRuleValue } from "../security/scope-validator";
 import { createProjectSalt } from "../security/token-fingerprint";
 import { StateLensRepository } from "../storage/database";
 import {
@@ -15,8 +16,16 @@ import {
   type ScopeRule,
   type Workflow,
 } from "../shared/schemas";
-import type { CaptureContext, IgnoredRequestSummary, ProjectBundle } from "../shared/types";
+import type {
+  CaptureContext,
+  CaptureDrainSummary,
+  ExportReceipt,
+  IgnoredRequestSummary,
+  ProjectBundle,
+  ProjectRecordCounts,
+} from "../shared/types";
 import { Dashboard } from "./components/Dashboard";
+import { EvidenceActions } from "./components/EvidenceActions";
 import { LimitSettings } from "./components/LimitSettings";
 import { ObservationDetail } from "./components/ObservationDetail";
 import { ProjectSetup } from "./components/ProjectSetup";
@@ -42,14 +51,26 @@ export default function App() {
   const [recoverableErrors, setRecoverableErrors] = useState(0);
   const [message, setMessage] = useState<string>();
   const [error, setError] = useState<string>();
+  const [captureState, setCaptureState] = useState<"idle" | "recording" | "stopping">("idle");
+  const [lastDrainSummary, setLastDrainSummary] = useState<CaptureDrainSummary>();
+  const [recordCounts, setRecordCounts] = useState<ProjectRecordCounts>({
+    projects: 0,
+    accountContexts: 0,
+    workflows: 0,
+    actionMarkers: 0,
+    observations: 0,
+  });
   const collectorRef = useRef(new NetworkCollector());
   const captureContextRef = useRef<CaptureContext | undefined>(undefined);
+  const recordingSessionIdRef = useRef<string | undefined>(undefined);
+  const stopPromiseRef = useRef<Promise<void> | undefined>(undefined);
 
   const activeProject = projects.find((project) => project.id === activeProjectId);
   const activeAccount = accounts.find((account) => account.id === activeAccountId);
   const activeWorkflow = workflows.find((workflow) => workflow.id === activeWorkflowId);
 
   useEffect(() => {
+    if (captureState !== "idle") return;
     if (activeProject && activeAccount && activeWorkflow) {
       captureContextRef.current = {
         project: activeProject,
@@ -60,7 +81,7 @@ export default function App() {
     } else {
       captureContextRef.current = undefined;
     }
-  }, [activeAccount, activeMarker, activeProject, activeWorkflow]);
+  }, [activeAccount, activeMarker, activeProject, activeWorkflow, captureState]);
 
   useEffect(() => {
     let alive = true;
@@ -79,7 +100,7 @@ export default function App() {
       });
     return () => {
       alive = false;
-      collector.stop();
+      void collector.stop().catch(() => undefined);
     };
   }, []);
 
@@ -96,12 +117,14 @@ export default function App() {
       repository.listAccountContexts(activeProjectId),
       repository.listWorkflows(activeProjectId),
       repository.estimateProjectBytes(activeProjectId),
+      repository.getProjectRecordCounts(activeProjectId),
     ])
-      .then(([loadedAccounts, loadedWorkflows, estimatedBytes]) => {
+      .then(([loadedAccounts, loadedWorkflows, estimatedBytes, loadedCounts]) => {
         if (!alive) return;
         setAccounts(loadedAccounts);
         setWorkflows(loadedWorkflows);
         setStorageBytes(estimatedBytes);
+        setRecordCounts(loadedCounts);
         setActiveAccountId((current) =>
           loadedAccounts.some((item) => item.id === current) ? current : loadedAccounts[0]?.id,
         );
@@ -138,13 +161,19 @@ export default function App() {
   }, [activeWorkflowId, repository]);
 
   const refreshStorage = useCallback(async () => {
-    if (repository && activeProjectId)
-      setStorageBytes(await repository.estimateProjectBytes(activeProjectId));
+    if (repository && activeProjectId) {
+      const [bytes, counts] = await Promise.all([
+        repository.estimateProjectBytes(activeProjectId),
+        repository.getProjectRecordCounts(activeProjectId),
+      ]);
+      setStorageBytes(bytes);
+      setRecordCounts(counts);
+    }
   }, [activeProjectId, repository]);
 
   async function createProject(name: string, description?: string): Promise<void> {
     if (!repository) return;
-    if (activeWorkflow?.status === "recording") {
+    if (captureState !== "idle") {
       setError("Stop the active recording before changing projects.");
       return;
     }
@@ -172,10 +201,13 @@ export default function App() {
 
   async function addScope(rule: Omit<ScopeRule, "id" | "enabled">): Promise<void> {
     if (!repository || !activeProject) return;
-    validateScopeInput(rule);
+    const normalizedRule = { ...rule, value: normalizeScopeRuleValue(rule.type, rule.value) };
     const updated: Project = {
       ...activeProject,
-      scope: [...activeProject.scope, { ...rule, id: crypto.randomUUID(), enabled: true }],
+      scope: [
+        ...activeProject.scope,
+        { ...normalizedRule, id: crypto.randomUUID(), enabled: true },
+      ],
       updatedAt: new Date().toISOString(),
     };
     await repository.putProject(updated);
@@ -185,7 +217,7 @@ export default function App() {
 
   async function createAccount(name: string, role?: string, tenantLabel?: string): Promise<void> {
     if (!repository || !activeProject) return;
-    if (activeWorkflow?.status === "recording") {
+    if (captureState !== "idle") {
       setError("Stop the active recording before changing account contexts.");
       return;
     }
@@ -203,7 +235,7 @@ export default function App() {
 
   async function createWorkflow(name: string): Promise<void> {
     if (!repository || !activeProject || !activeAccountId) return;
-    if (activeWorkflow?.status === "recording") {
+    if (captureState !== "idle") {
       setError("Stop the active recording before creating another workflow.");
       return;
     }
@@ -223,6 +255,9 @@ export default function App() {
 
   async function startRecording(): Promise<void> {
     if (!repository || !activeProject || !activeAccount || !activeWorkflow) return;
+    if (captureState !== "idle" || collectorRef.current.getState() !== "idle") {
+      throw new Error("A recording is already active or stopping");
+    }
     if (!activeProject.scope.some((rule) => rule.enabled)) {
       setError("Recording is blocked until an enabled scope rule exists.");
       return;
@@ -230,6 +265,9 @@ export default function App() {
     if (activeWorkflow.accountContextId !== activeAccount.id) {
       setError("The selected workflow belongs to a different account context.");
       return;
+    }
+    if (activeWorkflow.status !== "draft") {
+      throw new Error("Create a new draft workflow before starting another recording");
     }
     const updated: Workflow = {
       ...activeWorkflow,
@@ -245,54 +283,142 @@ export default function App() {
       accountContext: activeAccount,
     };
     setIgnored({ count: 0, hostnames: [] });
+    setLastDrainSummary(undefined);
     setError(undefined);
-    setMessage("Recording started. Reload the inspected page to capture its full workflow.");
-    collectorRef.current.start({
-      getContext: () => captureContextRef.current,
-      onObservation: async (observation) => {
-        const storedWorkflow = await repository.appendObservation(observation);
-        setObservations((current) => [...current, observation]);
+    let sessionId: string;
+    try {
+      sessionId = collectorRef.current.start({
+        getContext: () => captureContextRef.current,
+        onObservation: async (observation, handlerSessionId) => {
+          if (recordingSessionIdRef.current !== handlerSessionId) return;
+          const storedWorkflow = await repository.appendObservation(observation);
+          if (recordingSessionIdRef.current !== handlerSessionId) return;
+          setObservations((current) => [...current, observation]);
+          setWorkflows((current) =>
+            current.map((item) => (item.id === storedWorkflow.id ? storedWorkflow : item)),
+          );
+          if (captureContextRef.current)
+            captureContextRef.current = { ...captureContextRef.current, workflow: storedWorkflow };
+          await refreshStorage();
+        },
+        onIgnored: (summary, handlerSessionId) => {
+          if (recordingSessionIdRef.current === handlerSessionId) setIgnored(summary);
+        },
+        onError: (message, handlerSessionId) => {
+          if (recordingSessionIdRef.current === handlerSessionId) setError(message);
+        },
+        onLimitReached: async (handlerSessionId) => {
+          if (recordingSessionIdRef.current === handlerSessionId) await stopRecording();
+        },
+      });
+    } catch (cause) {
+      captureContextRef.current = {
+        project: activeProject,
+        workflow: activeWorkflow,
+        accountContext: activeAccount,
+      };
+      try {
+        await repository.putWorkflow(activeWorkflow);
         setWorkflows((current) =>
-          current.map((item) => (item.id === storedWorkflow.id ? storedWorkflow : item)),
+          current.map((item) => (item.id === activeWorkflow.id ? activeWorkflow : item)),
         );
-        if (captureContextRef.current)
-          captureContextRef.current = { ...captureContextRef.current, workflow: storedWorkflow };
-        await refreshStorage();
-      },
-      onIgnored: setIgnored,
-      onError: setError,
-      onLimitReached: stopRecording,
-    });
+      } catch (rollbackCause) {
+        throw new Error(
+          `${errorMessage(cause)}; workflow rollback also failed: ${errorMessage(rollbackCause)}`,
+        );
+      }
+      throw cause;
+    }
+    recordingSessionIdRef.current = sessionId;
+    setCaptureState("recording");
+    setMessage("Recording started. Reload the inspected page to capture its full workflow.");
   }
 
-  async function stopRecording(): Promise<void> {
-    const workflowToStop = captureContextRef.current?.workflow ?? activeWorkflow;
-    if (!repository || !workflowToStop) return;
-    collectorRef.current.stop();
-    const updated: Workflow = {
-      ...workflowToStop,
-      status: "completed",
-      endedAt: new Date().toISOString(),
-    };
-    await repository.putWorkflow(updated);
-    setWorkflows((current) => current.map((item) => (item.id === updated.id ? updated : item)));
-    setActiveMarker(undefined);
-    setMessage(`Recording stopped with ${updated.observationIds.length} captured request(s).`);
+  function stopRecording(): Promise<void> {
+    if (stopPromiseRef.current) return stopPromiseRef.current;
+    if (!repository || collectorRef.current.getState() === "idle") return Promise.resolve();
+    const sessionId = recordingSessionIdRef.current;
+    setCaptureState("stopping");
+    const stopping = (async () => {
+      const summary = await collectorRef.current.stop();
+      const currentContext = captureContextRef.current;
+      const workflowToStop = currentContext?.workflow;
+      if (!currentContext || !workflowToStop || recordingSessionIdRef.current !== sessionId) return;
+      if (currentContext.activeMarker) {
+        const ended = await repository.endActionMarker(
+          currentContext.activeMarker.id,
+          workflowToStop.id,
+        );
+        setMarkers((current) => current.map((item) => (item.id === ended.id ? ended : item)));
+      }
+      const updated: Workflow = {
+        ...workflowToStop,
+        status: "completed",
+        endedAt: new Date().toISOString(),
+      };
+      await repository.putWorkflow(updated);
+      if (recordingSessionIdRef.current !== sessionId) return;
+      setWorkflows((current) => current.map((item) => (item.id === updated.id ? updated : item)));
+      setActiveMarker(undefined);
+      captureContextRef.current = {
+        project: currentContext.project,
+        workflow: updated,
+        accountContext: currentContext.accountContext,
+      };
+      setLastDrainSummary(summary);
+      setMessage(
+        `Recording stopped: ${summary.completed} completed, ${summary.timedOut} timed out, ${summary.discarded} discarded.`,
+      );
+      recordingSessionIdRef.current = undefined;
+      setCaptureState("idle");
+    })()
+      .catch((cause: unknown) => {
+        setError(`Recording stop failed: ${errorMessage(cause)}`);
+        throw cause;
+      })
+      .finally(() => {
+        if (recordingSessionIdRef.current === sessionId) {
+          recordingSessionIdRef.current = undefined;
+          setCaptureState("idle");
+        }
+        stopPromiseRef.current = undefined;
+      });
+    stopPromiseRef.current = stopping;
+    return stopping;
   }
 
   async function addMarker(label: string, notes?: string): Promise<void> {
-    if (!repository || !activeWorkflow) return;
-    const marker = createActionMarker(activeWorkflow.id, label, notes);
-    const updated = { ...activeWorkflow, markerIds: [...activeWorkflow.markerIds, marker.id] };
-    await repository.putActionMarker(marker);
-    await repository.putWorkflow(updated);
+    const context = captureContextRef.current;
+    if (!repository || captureState !== "recording" || !context) {
+      throw new Error("Action markers require an active recording");
+    }
+    if (!label.trim()) throw new Error("Action marker label cannot be empty");
+    if (context.workflow.status !== "recording" || context.workflow.id !== activeWorkflowId) {
+      throw new Error("The marker does not belong to the active recording workflow");
+    }
+    const marker = createActionMarker(context.workflow.id, label, notes);
+    const updated = await repository.activateActionMarker(marker, context.activeMarker?.id);
+    captureContextRef.current = { ...context, workflow: updated, activeMarker: marker };
     setMarkers((current) => [...current, marker]);
     setWorkflows((current) => current.map((item) => (item.id === updated.id ? updated : item)));
     setActiveMarker(marker);
   }
 
-  async function exportProject(): Promise<ProjectBundle | undefined> {
-    if (!repository || !activeProject) return;
+  async function endActiveMarker(): Promise<void> {
+    const context = captureContextRef.current;
+    if (!repository || captureState !== "recording" || !context?.activeMarker) return;
+    const ended = await repository.endActionMarker(context.activeMarker.id, context.workflow.id);
+    captureContextRef.current = {
+      project: context.project,
+      workflow: context.workflow,
+      accountContext: context.accountContext,
+    };
+    setMarkers((current) => current.map((item) => (item.id === ended.id ? ended : item)));
+    setActiveMarker(undefined);
+  }
+
+  async function exportProject(): Promise<ExportReceipt> {
+    if (!repository || !activeProject) throw new Error("Select a project before exporting");
     const projectWorkflows = await repository.listWorkflows(activeProject.id);
     const bundle: ProjectBundle = {
       exportedAt: new Date().toISOString(),
@@ -307,21 +433,45 @@ export default function App() {
       ).flat(),
       observations: await repository.listProjectObservations(activeProject.id),
     };
-    downloadTextFile(`${activeProject.name}-statelens.json`, createSanitizedJsonExport(bundle));
-    setMessage("Sanitized project evidence exported. Raw secrets were excluded.");
-    return bundle;
+    const receipt = await initiateSanitizedJsonExport(
+      bundle,
+      `${activeProject.name}-statelens.json`,
+    );
+    setMessage(
+      `Download initiated for ${receipt.filename}. StateLens cannot confirm that the file was saved.`,
+    );
+    return receipt;
   }
 
-  async function exportThenPurge(): Promise<void> {
-    if (!repository || !activeProject) return;
-    if (!window.confirm(`Export and permanently delete local project “${activeProject.name}”?`))
-      return;
-    await exportProject();
+  async function purgeProject(confirmationName: string): Promise<void> {
+    if (!repository || !activeProject) throw new Error("Select a project before purging");
+    if (captureState !== "idle") throw new Error("Stop and finish draining before purging");
+    if (confirmationName !== activeProject.name) {
+      throw new Error("Project name confirmation did not match");
+    }
+    if (
+      !window.confirm(
+        `Permanently purge local project “${activeProject.name}”? This cannot be undone.`,
+      )
+    ) {
+      throw new Error("Purge cancelled; no records were deleted");
+    }
     await repository.purgeProject(activeProject.id);
     const remaining = projects.filter((item) => item.id !== activeProject.id);
     setProjects(remaining);
     setActiveProjectId(remaining[0]?.id);
-    setMessage("Project export completed and local project data was purged.");
+    setAccounts([]);
+    setWorkflows([]);
+    setMarkers([]);
+    setObservations([]);
+    setRecordCounts({
+      projects: 0,
+      accountContexts: 0,
+      workflows: 0,
+      actionMarkers: 0,
+      observations: 0,
+    });
+    setMessage("The selected local project and its related records were permanently purged.");
   }
 
   async function saveProjectSettings(
@@ -344,7 +494,7 @@ export default function App() {
   }
 
   function selectWhileIdle(kind: "project" | "account" | "workflow", id: string): void {
-    if (activeWorkflow?.status === "recording") {
+    if (captureState !== "idle") {
       setError(`Stop the active recording before changing the ${kind}.`);
       return;
     }
@@ -357,7 +507,8 @@ export default function App() {
     activeProject?.scope.some((rule) => rule.enabled) &&
     activeAccount &&
     activeWorkflow &&
-    activeWorkflow.status !== "recording" &&
+    captureState === "idle" &&
+    activeWorkflow.status === "draft" &&
     activeWorkflow.accountContextId === activeAccount.id,
   );
 
@@ -401,6 +552,15 @@ export default function App() {
           onStart={startRecording}
           onStop={stopRecording}
           onMarker={addMarker}
+          onEndMarker={endActiveMarker}
+          activeMarkerLabel={activeMarker?.label}
+          captureState={captureState}
+          lastDrainSummary={lastDrainSummary}
+          onError={setError}
+          onActionStart={() => {
+            setError(undefined);
+            setMessage(undefined);
+          }}
         />
         <div className={selectedObservation ? "workspace with-detail" : "workspace"}>
           <div className="page-content">
@@ -430,6 +590,12 @@ export default function App() {
                 activeProjectId={activeProjectId}
                 activeAccountId={activeAccountId}
                 activeWorkflowId={activeWorkflowId}
+                disabled={captureState !== "idle"}
+                onError={setError}
+                onActionStart={() => {
+                  setError(undefined);
+                  setMessage(undefined);
+                }}
                 onSelectProject={(id) => selectWhileIdle("project", id)}
                 onSelectAccount={(id) => selectWhileIdle("account", id)}
                 onSelectWorkflow={(id) => selectWhileIdle("workflow", id)}
@@ -439,43 +605,38 @@ export default function App() {
                 onCreateWorkflow={createWorkflow}
               />
             )}
-            {page === "evidence" && (
-              <section className="card evidence-card">
-                <h2>Sanitized evidence export</h2>
-                <p>
-                  Export the current project, contexts, workflows, markers, and observations as
-                  validated JSON. Authorization, cookies, token fields, session values, and matching
-                  custom patterns remain redacted.
-                </p>
-                <button
-                  className="primary"
-                  disabled={!activeProject}
-                  onClick={() => void exportProject()}
-                >
-                  Export sanitized JSON
-                </button>
-                <hr />
-                <h2>Local data purge</h2>
-                <p>
-                  StateLens exports a sanitized copy before deleting the selected project and its
-                  related local records.
-                </p>
-                <button
-                  className="danger"
-                  disabled={!activeProject || activeWorkflow?.status === "recording"}
-                  onClick={() => void exportThenPurge()}
-                >
-                  Export then purge project
-                </button>
-              </section>
-            )}
+            {page === "evidence" &&
+              (activeProject ? (
+                <EvidenceActions
+                  projectName={activeProject.name}
+                  counts={recordCounts}
+                  captureState={captureState}
+                  onExport={exportProject}
+                  onPurge={purgeProject}
+                  onError={setError}
+                  onActionStart={() => {
+                    setError(undefined);
+                    setMessage(undefined);
+                  }}
+                />
+              ) : (
+                <div className="empty-state">
+                  <h2>No project selected</h2>
+                  <p>Create or select a project before exporting or purging local evidence.</p>
+                </div>
+              ))}
             {page === "settings" && activeProject && (
               <>
                 <LimitSettings
                   limits={activeProject.settings.limits}
                   revealIgnoredHostnames={activeProject.settings.revealIgnoredHostnames}
-                  disabled={activeWorkflow?.status === "recording"}
+                  disabled={captureState !== "idle"}
                   onSave={saveProjectSettings}
+                  onError={setError}
+                  onActionStart={() => {
+                    setError(undefined);
+                    setMessage(undefined);
+                  }}
                 />
                 <section className="card permission-card">
                   <h2>Permission status</h2>
@@ -519,16 +680,6 @@ export default function App() {
 
 function errorMessage(value: unknown): string {
   return value instanceof Error ? value.message : "Unexpected error";
-}
-function validateScopeInput(rule: Omit<ScopeRule, "id" | "enabled">): void {
-  if (rule.type === "url-prefix") {
-    const url = new URL(rule.value);
-    if (!/^https?:$/.test(url.protocol)) throw new Error("URL-prefix scope must use HTTP or HTTPS");
-    return;
-  }
-  const url = new URL(rule.value.includes("://") ? rule.value : `https://${rule.value}`);
-  if (!url.hostname || url.pathname !== "/" || url.search || url.hash)
-    throw new Error("Host scope must contain only a hostname, with optional scheme and port");
 }
 function pageTitle(page: PageName): string {
   return {

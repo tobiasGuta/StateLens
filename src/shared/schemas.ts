@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { DEFAULT_LIMITS, SAFE_LIMIT_CEILINGS } from "./constants";
+import { validateCustomRedactionPatterns } from "../security/custom-redaction";
 
 const isoDate = z.string().datetime({ offset: true });
 const nonEmpty = z.string().trim().min(1);
@@ -36,7 +37,19 @@ export const projectSettingsSchema = z
   .object({
     limits: projectLimitsSchema,
     projectSalt: nonEmpty,
-    customRedactionPatterns: z.array(z.string().max(200)).max(50).default([]),
+    customRedactionPatterns: z
+      .array(z.string())
+      .superRefine((patterns, context) => {
+        try {
+          validateCustomRedactionPatterns(patterns);
+        } catch (error) {
+          context.addIssue({
+            code: "custom",
+            message: error instanceof Error ? error.message : "Invalid custom redaction patterns",
+          });
+        }
+      })
+      .default([]),
     revealIgnoredHostnames: z.boolean().default(false),
   })
   .strict();

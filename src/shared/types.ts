@@ -34,6 +34,13 @@ export interface IgnoredRequestSummary {
   hostnames: string[];
 }
 
+export interface CaptureDrainSummary {
+  sessionId: string;
+  completed: number;
+  timedOut: number;
+  discarded: number;
+}
+
 export interface ProjectBundle {
   exportedAt: string;
   formatVersion: 1;
@@ -42,6 +49,20 @@ export interface ProjectBundle {
   workflows: Workflow[];
   actionMarkers: ActionMarker[];
   observations: RequestObservation[];
+}
+
+export interface ExportReceipt {
+  filename: string;
+  sha256: string;
+  byteSize: number;
+}
+
+export interface ProjectRecordCounts {
+  projects: number;
+  accountContexts: number;
+  workflows: number;
+  actionMarkers: number;
+  observations: number;
 }
 
 export type { AccountContext, ActionMarker, Project, RequestObservation, ScopeRule, Workflow };

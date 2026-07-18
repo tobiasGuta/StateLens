@@ -49,6 +49,12 @@ Recording cannot start without an enabled rule. Exact-host and subdomain matchin
 
 Headers and structured values are redacted before persistence. Query token fields are replaced. A final recursive redaction pass runs during JSON export and removes the project HMAC salt. Filenames are normalized and restricted to safe characters. The MVP deliberately has no raw-secret reveal or unredacted export path.
 
+StateLens hashes the exact sanitized UTF-8 export bytes before initiating the browser download and reports the expected filename and byte size. It does not claim that the browser saved the file. Purge is a separate destructive action with displayed record counts, exact-name entry, and final confirmation; it never assumes an export is a backup.
+
+### Custom regular-expression denial of service
+
+Custom redaction patterns are bounded in count and length, must compile locally, and are conservatively rejected when they contain nested quantifiers. They operate only on already size-bounded captured content. If corrupted legacy custom settings are encountered, built-in redaction continues and invalid settings fail Zod validation rather than being persisted as valid data.
+
 ### Malformed HAR or DevTools data
 
 The collector validates the minimum runtime shape before normalization. Missing values receive conservative defaults. Parse and response-content failures become explicit capture errors; they are not swallowed and do not crash the recorder.

@@ -1,5 +1,6 @@
-import type { ProjectBundle } from "../shared/types";
+import type { ExportReceipt, ProjectBundle } from "../shared/types";
 import { redactStructuredValue } from "../security/redactor";
+import { sha256Hex } from "../security/token-fingerprint";
 
 export function createSanitizedJsonExport(bundle: ProjectBundle): string {
   return JSON.stringify(redactStructuredValue(bundle).value, null, 2);
@@ -25,4 +26,16 @@ export function downloadTextFile(
   anchor.rel = "noopener";
   anchor.click();
   setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
+export async function initiateSanitizedJsonExport(
+  bundle: ProjectBundle,
+  requestedFilename: string,
+): Promise<ExportReceipt> {
+  const content = createSanitizedJsonExport(bundle);
+  const filename = sanitizeFilename(requestedFilename);
+  const byteSize = new TextEncoder().encode(content).byteLength;
+  const sha256 = await sha256Hex(content);
+  downloadTextFile(filename, content);
+  return { filename, sha256, byteSize };
 }

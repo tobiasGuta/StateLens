@@ -64,9 +64,18 @@ describe("secret redaction", () => {
     expect(new URL(result.value).searchParams.get("state")).toBe("visible");
   });
 
-  it("supports valid custom redaction patterns and ignores malformed ones", () => {
-    const result = redactText("customer-code=ABC-123", ["ABC-[0-9]+", "["]);
+  it("supports a valid custom redaction pattern", () => {
+    const result = redactText("customer-code=ABC-123", ["ABC-[0-9]+"]);
     expect(result.value).toBe("customer-code=[REDACTED]");
+  });
+
+  it("rejects an unsafe custom set without disabling built-in redaction", () => {
+    const result = redactText("customer-code=ABC-123 Authorization: Bearer secret", [
+      "ABC-[0-9]+",
+      "[",
+    ]);
+    expect(result.value).toContain("customer-code=ABC-123");
+    expect(result.value).not.toContain("secret");
   });
 
   it("blocks prototype-pollution keys", () => {

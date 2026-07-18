@@ -1,5 +1,7 @@
 # StateLens
 
+[![CI](https://github.com/tobiasGuta/StateLens/actions/workflows/ci.yml/badge.svg)](https://github.com/tobiasGuta/StateLens/actions/workflows/ci.yml)
+
 **Business Logic and Authorization Workflow Mapper**
 
 StateLens is a local-first Chrome DevTools extension for authorized bug bounty hunters and penetration testers. It records completed requests from a deliberately scoped workflow, preserves sanitized evidence, and helps a human understand how an application behaves across accounts and actions.
@@ -21,7 +23,9 @@ StateLens is not an exploitation tool. The MVP does not replay requests, modify 
 - Project-specific HMAC-SHA-256 fingerprints for redacted header values
 - Versioned IndexedDB storage with Zod validation, atomic observation/workflow writes, recoverable invalid-record errors, and complete project purge
 - Timeline and redacted observation-detail views
-- Sanitized JSON export and export-before-purge workflow
+- Sanitized JSON export initiation with exact byte size and SHA-256 receipt
+- Separate typed-confirmation project purge with record counts
+- Recording-session generations, response-content timeout, and bounded stop draining
 
 Workflow comparison, identifier correlation, state inference, explainable hypotheses, Markdown evidence reports, cURL, and raw HTTP export are intentionally reserved for later phases. They are not represented as working features in this release.
 
@@ -50,6 +54,8 @@ npm.cmd run lint
 npm.cmd run typecheck
 npm.cmd test
 npm.cmd run build
+npm.cmd run verify:dist
+npm.cmd run check:forbidden
 ```
 
 The built extension is written to `dist/`. Node.js is not required after the extension is built.
@@ -101,7 +107,20 @@ Open **Timeline** and select a request. The detail pane exposes metadata, saniti
 
 ### Export or delete
 
-Open **Evidence** to download a sanitized JSON bundle. The final export path applies another recursive redaction pass and excludes the project fingerprint salt. The purge control exports first and then deletes the project and its child records after explicit confirmation.
+Open **Evidence** to initiate a sanitized JSON download. The final export path applies another recursive redaction pass and excludes the project fingerprint salt. StateLens displays the expected filename, SHA-256 of the exact exported bytes, byte size, and the honest status “download initiated”; it cannot determine whether Chrome saved the file.
+
+Purge is a separate action and does not assume an export or backup exists. It is disabled during recording and draining, displays record counts, requires the exact project name, and asks for final confirmation.
+
+## Synthetic Chrome harness
+
+Run the two local-only servers in separate terminals:
+
+```powershell
+npm.cmd run demo
+npm.cmd run demo:secondary
+```
+
+Open `http://localhost:4173`. The harness exercises supported bodies, fake sensitive values, limits, redirects, status boundaries, duplicates, and concurrency without real targets. Follow [docs/CHROME_VERIFICATION.md](docs/CHROME_VERIFICATION.md); its results remain `NOT RUN` until a human completes them.
 
 ## Privacy design
 
@@ -124,6 +143,7 @@ The **Project Settings** page displays this permission posture and explains how 
 
 - Manual browser loading and target-page capture must be verified for each supported Chrome release.
 - Chrome can make response content unavailable; StateLens records the limitation without inventing content.
+- Response-content retrieval has a bounded internal timeout, and stopping uses a bounded drain before final workflow completion.
 - Compressed responses are handled only as Chrome exposes them through `getContent`.
 - Uploaded binary content is omitted; only multipart field/file metadata is retained.
 - Ignored-request counters are session state and are not persisted as sensitive traffic records.
@@ -138,7 +158,7 @@ The **Project Settings** page displays this permission posture and explains how 
 3. Conservative state-transition inference with correction controls
 4. Explainable authorization, replay, idempotency, and race-condition candidates
 5. Evidence builder plus Markdown, cURL, and raw HTTP exporters
-6. Synthetic example-domain demo workflows and broader integration testing
+6. Broader synthetic browser integration coverage
 
 Every future candidate will remain unverified by default, include evidence observation IDs and human-readable reasons, and avoid vulnerability severity labels.
 

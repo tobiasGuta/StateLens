@@ -69,4 +69,24 @@ describe("HAR normalization", () => {
       expect.objectContaining({ code: "out-of-scope-redirect" }),
     );
   });
+
+  it("applies the active marker from the synchronous capture context", async () => {
+    const marker = {
+      id: "marker-immediate",
+      workflowId: "workflow-1",
+      label: "Clicked pay",
+      startedAt: "2026-07-18T12:00:00.500Z",
+    };
+    const observation = await normalizeHarEntry(
+      entry,
+      { content: "{}" },
+      {
+        project: fixtureProject(),
+        workflow: fixtureWorkflow({ status: "recording", markerIds: [marker.id] }),
+        accountContext: { id: "account-1", projectId: "project-1", name: "A" },
+        activeMarker: marker,
+      },
+    );
+    expect(observation.actionMarkerId).toBe(marker.id);
+  });
 });

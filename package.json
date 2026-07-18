@@ -11,7 +11,14 @@
     "test:watch": "vitest",
     "lint": "eslint . --max-warnings=0",
     "format": "prettier --write .",
-    "format:check": "prettier --check ."
+    "format:check": "prettier --check .",
+    "verify:dist": "node scripts/verify-dist.mjs",
+    "check:forbidden": "node scripts/check-forbidden.mjs",
+    "verify": "node scripts/verify.mjs",
+    "audit:prod": "npm audit --omit=dev --audit-level=high",
+    "audit:all": "npm audit --audit-level=high",
+    "demo": "node scripts/demo-server.mjs --port=4173 --secondary-port=4174",
+    "demo:secondary": "node scripts/demo-server.mjs --port=4174 --secondary-port=4173"
   },
   "dependencies": {
     "idb": "^8.0.3",

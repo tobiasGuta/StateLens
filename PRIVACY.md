@@ -26,7 +26,7 @@ Oversized, unsupported, binary, or base64 bodies are omitted. Size, state, reaso
 
 ## User control
 
-Users choose when recording starts and stops, what projects exist, what is exported, and when local data is deleted. The purge action exports a sanitized project copy before deleting the project and related records.
+Users choose when recording starts and stops, what projects exist, what is exported, and when local data is deleted. Export initiation and purge are independent actions. An initiated download is not treated as proof that a file was saved, and purge never claims that a backup exists. Purge requires the exact project name and explicit confirmation.
 
 Removing the extension through `chrome://extensions` removes extension-controlled browser storage according to Chrome's behavior. Protect exported files separately; they are outside StateLens after download.
 

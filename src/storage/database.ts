@@ -15,6 +15,7 @@ import {
   type Workflow,
 } from "../shared/schemas";
 import type { ZodType } from "zod";
+import type { ProjectRecordCounts } from "../shared/types";
 
 interface StateLensDatabase extends DBSchema {
   projects: { key: string; value: Project };
@@ -86,12 +87,60 @@ export class StateLensRepository {
     await this.database.put("actionMarkers", actionMarkerSchema.parse(marker));
   }
 
+  async activateActionMarker(marker: ActionMarker, previousMarkerId?: string): Promise<Workflow> {
+    const validMarker = actionMarkerSchema.parse(marker);
+    const transaction = this.database.transaction(["actionMarkers", "workflows"], "readwrite");
+    const workflow = await transaction.objectStore("workflows").get(marker.workflowId);
+    if (!workflow || workflow.status !== "recording") {
+      throw new Error("Action markers can only be added to the active recording workflow");
+    }
+    if (previousMarkerId) {
+      const previous = await transaction.objectStore("actionMarkers").get(previousMarkerId);
+      if (previous && previous.workflowId === workflow.id && !previous.endedAt) {
+        await transaction
+          .objectStore("actionMarkers")
+          .put(actionMarkerSchema.parse({ ...previous, endedAt: marker.startedAt }));
+      }
+    }
+    if (!workflow.markerIds.includes(marker.id)) workflow.markerIds.push(marker.id);
+    await transaction.objectStore("actionMarkers").put(validMarker);
+    await transaction.objectStore("workflows").put(workflowSchema.parse(workflow));
+    await transaction.done;
+    return workflow;
+  }
+
+  async endActionMarker(markerId: string, workflowId: string): Promise<ActionMarker> {
+    const transaction = this.database.transaction(["actionMarkers", "workflows"], "readwrite");
+    const [marker, workflow] = await Promise.all([
+      transaction.objectStore("actionMarkers").get(markerId),
+      transaction.objectStore("workflows").get(workflowId),
+    ]);
+    if (
+      !marker ||
+      marker.workflowId !== workflowId ||
+      !workflow ||
+      workflow.status !== "recording"
+    ) {
+      throw new Error("The active marker does not belong to the recording workflow");
+    }
+    const ended = actionMarkerSchema.parse({
+      ...marker,
+      endedAt: marker.endedAt ?? new Date().toISOString(),
+    });
+    await transaction.objectStore("actionMarkers").put(ended);
+    await transaction.done;
+    return ended;
+  }
+
   async appendObservation(observation: RequestObservation): Promise<Workflow> {
     const validObservation = requestObservationSchema.parse(observation);
     const transaction = this.database.transaction(["observations", "workflows"], "readwrite");
     const workflow = await transaction.objectStore("workflows").get(observation.workflowId);
     if (!workflow) {
       throw new Error("Cannot store an observation for a missing workflow");
+    }
+    if (workflow.status !== "recording") {
+      throw new Error("Cannot store an observation after workflow recording has ended");
     }
     if (!workflow.observationIds.includes(observation.id))
       workflow.observationIds.push(observation.id);
@@ -184,6 +233,25 @@ export class StateLensRepository {
       await Promise.all(workflows.map((workflow) => this.listActionMarkers(workflow.id)))
     ).flat();
     return new Blob([JSON.stringify({ project, accounts, workflows, markers, observations })]).size;
+  }
+
+  async getProjectRecordCounts(projectId: string): Promise<ProjectRecordCounts> {
+    const [projects, accountContexts, workflows, observations] = await Promise.all([
+      this.listProjects(),
+      this.listAccountContexts(projectId),
+      this.listWorkflows(projectId),
+      this.listProjectObservations(projectId),
+    ]);
+    const actionMarkers = (
+      await Promise.all(workflows.map((workflow) => this.listActionMarkers(workflow.id)))
+    ).flat();
+    return {
+      projects: projects.some((project) => project.id === projectId) ? 1 : 0,
+      accountContexts: accountContexts.length,
+      workflows: workflows.length,
+      actionMarkers: actionMarkers.length,
+      observations: observations.length,
+    };
   }
 
   private async readValidated<T>(

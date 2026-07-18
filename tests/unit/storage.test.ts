@@ -56,6 +56,16 @@ describe("IndexedDB repository", () => {
     repository.close();
   });
 
+  it("rejects observations after workflow completion", async () => {
+    const repository = await StateLensRepository.open(databaseName());
+    await repository.putWorkflow(fixtureWorkflow({ status: "completed" }));
+    await expect(repository.appendObservation(fixtureObservation())).rejects.toThrow(
+      "recording has ended",
+    );
+    expect(await repository.listObservations("workflow-1")).toEqual([]);
+    repository.close();
+  });
+
   it("purges only the selected project and all of its child records", async () => {
     const repository = await StateLensRepository.open(databaseName());
     const other = fixtureProject({ id: "project-2", name: "Keep me" });
@@ -96,6 +106,46 @@ describe("IndexedDB repository", () => {
     const workflows = await repository.listWorkflows("project-1");
     expect(workflows[0]?.observationIds).toHaveLength(50);
     expect(await repository.listObservations("workflow-1")).toHaveLength(50);
+    repository.close();
+  });
+
+  it("atomically activates, replaces, and ends markers only for a recording workflow", async () => {
+    const repository = await StateLensRepository.open(databaseName());
+    await repository.putWorkflow(fixtureWorkflow({ status: "recording" }));
+    const first = {
+      id: "marker-1",
+      workflowId: "workflow-1",
+      label: "Clicked checkout",
+      startedAt: "2026-07-18T12:00:00.000Z",
+    };
+    const second = {
+      id: "marker-2",
+      workflowId: "workflow-1",
+      label: "Confirmed order",
+      startedAt: "2026-07-18T12:00:01.000Z",
+    };
+    await repository.activateActionMarker(first);
+    const workflow = await repository.activateActionMarker(second, first.id);
+    expect(workflow.markerIds).toEqual([first.id, second.id]);
+    const markers = await repository.listActionMarkers("workflow-1");
+    expect(markers.find((marker) => marker.id === first.id)?.endedAt).toBe(second.startedAt);
+    const ended = await repository.endActionMarker(second.id, "workflow-1");
+    expect(ended.endedAt).toBeTruthy();
+    repository.close();
+  });
+
+  it("rejects markers for a completed workflow", async () => {
+    const repository = await StateLensRepository.open(databaseName());
+    await repository.putWorkflow(fixtureWorkflow({ status: "completed" }));
+    await expect(
+      repository.activateActionMarker({
+        id: "marker-1",
+        workflowId: "workflow-1",
+        label: "Too late",
+        startedAt: "2026-07-18T12:00:00.000Z",
+      }),
+    ).rejects.toThrow("active recording workflow");
+    expect(await repository.listActionMarkers("workflow-1")).toEqual([]);
     repository.close();
   });
 });
