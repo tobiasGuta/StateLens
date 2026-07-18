@@ -6,7 +6,7 @@ import { clampProjectLimits } from "../security/size-limits";
 import { normalizeScopeRuleValue } from "../security/scope-validator";
 import { createProjectSalt } from "../security/token-fingerprint";
 import { StateLensRepository } from "../storage/database";
-import { compareObservations } from "../shared/observation-order";
+import { compareWorkflowObservations } from "../shared/observation-order";
 import {
   defaultProjectLimits,
   type AccountContext,
@@ -34,7 +34,11 @@ import { LimitSettings } from "./components/LimitSettings";
 import { ObservationDetail } from "./components/ObservationDetail";
 import { ProjectSetup } from "./components/ProjectSetup";
 import { RecorderBar } from "./components/RecorderBar";
-import { FinalizationRecoveryPanel, InterruptedWorkflowPanel } from "./components/RecoveryPanel";
+import {
+  FinalizationRecoveryPanel,
+  InterruptedWorkflowPanel,
+  InterruptedWorkflowsSection,
+} from "./components/RecoveryPanel";
 import { Sidebar, type PageName } from "./components/Sidebar";
 import { Timeline } from "./components/Timeline";
 import {
@@ -67,6 +71,7 @@ export default function App() {
   const [interruptedWorkflows, setInterruptedWorkflows] = useState<InterruptedWorkflowCandidate[]>(
     [],
   );
+  const [keptInterruptedWorkflowIds, setKeptInterruptedWorkflowIds] = useState<string[]>([]);
   const [recordCounts, setRecordCounts] = useState<ProjectRecordCounts>({
     projects: 0,
     accountContexts: 0,
@@ -83,8 +88,14 @@ export default function App() {
   const activeAccount = accounts.find((account) => account.id === activeAccountId);
   const activeWorkflow = workflows.find((workflow) => workflow.id === activeWorkflowId);
   const interruptedCandidate =
-    interruptedWorkflows.find((candidate) => candidate.workflow.id === activeWorkflowId) ??
-    interruptedWorkflows[0];
+    interruptedWorkflows.find(
+      (candidate) =>
+        candidate.workflow.id === activeWorkflowId &&
+        !keptInterruptedWorkflowIds.includes(candidate.workflow.id),
+    ) ??
+    interruptedWorkflows.find(
+      (candidate) => !keptInterruptedWorkflowIds.includes(candidate.workflow.id),
+    );
 
   useEffect(() => {
     if (captureState !== "idle") return;
@@ -179,7 +190,7 @@ export default function App() {
     ])
       .then(([loadedObservations, loadedMarkers]) => {
         if (!alive) return;
-        setObservations(loadedObservations.sort(compareObservations));
+        setObservations(loadedObservations.sort(compareWorkflowObservations));
         setMarkers(loadedMarkers.sort((a, b) => a.startedAt.localeCompare(b.startedAt)));
       })
       .catch((cause: unknown) => setError(errorMessage(cause)));
@@ -479,10 +490,26 @@ export default function App() {
 
   function keepInterruptedWorkflowForReview(): void {
     if (!interruptedCandidate) return;
-    advanceInterruptedRecovery(interruptedCandidate.workflow.id);
+    const kept = new Set([...keptInterruptedWorkflowIds, interruptedCandidate.workflow.id]);
+    setKeptInterruptedWorkflowIds([...kept]);
+    const next = interruptedWorkflows.find((candidate) => !kept.has(candidate.workflow.id));
+    if (next) selectInterruptedWorkflow(next);
     setMessage(
-      "Interrupted workflow kept for review. It remains recording in storage and cannot be resumed.",
+      "Interrupted workflow kept for review. It remains recording, cannot be resumed, and stays available in Interrupted workflows.",
     );
+  }
+
+  function reviewInterruptedWorkflow(workflowId: string): void {
+    const candidate = interruptedWorkflows.find((item) => item.workflow.id === workflowId);
+    if (!candidate) return;
+    setKeptInterruptedWorkflowIds((current) => current.filter((id) => id !== workflowId));
+    selectInterruptedWorkflow(candidate);
+  }
+
+  function selectInterruptedWorkflow(candidate: InterruptedWorkflowCandidate): void {
+    setActiveProjectId(candidate.workflow.projectId);
+    setActiveAccountId(candidate.workflow.accountContextId);
+    setActiveWorkflowId(candidate.workflow.id);
   }
 
   async function discardEmptyInterruptedWorkflow(): Promise<void> {
@@ -511,12 +538,12 @@ export default function App() {
     const remaining = interruptedWorkflows.filter(
       (candidate) => candidate.workflow.id !== resolvedWorkflowId,
     );
+    const kept = keptInterruptedWorkflowIds.filter((id) => id !== resolvedWorkflowId);
     setInterruptedWorkflows(remaining);
-    const next = remaining[0]?.workflow;
+    setKeptInterruptedWorkflowIds(kept);
+    const next = remaining.find((candidate) => !kept.includes(candidate.workflow.id));
     if (next) {
-      setActiveProjectId(next.projectId);
-      setActiveAccountId(next.accountContextId);
-      setActiveWorkflowId(next.id);
+      selectInterruptedWorkflow(next);
     } else if (discarded && activeWorkflowId === resolvedWorkflowId) {
       setActiveWorkflowId(undefined);
     }
@@ -709,6 +736,15 @@ export default function App() {
             onKeep={keepInterruptedWorkflowForReview}
             onDiscard={discardEmptyInterruptedWorkflow}
             onError={setError}
+          />
+        )}
+        {interruptedWorkflows.length > 0 && (
+          <InterruptedWorkflowsSection
+            candidates={interruptedWorkflows}
+            activeRecoveryWorkflowId={interruptedCandidate?.workflow.id}
+            keptWorkflowIds={keptInterruptedWorkflowIds}
+            disabled={captureState !== "idle" || Boolean(finalizationRecovery)}
+            onReview={reviewInterruptedWorkflow}
           />
         )}
         <RecorderBar

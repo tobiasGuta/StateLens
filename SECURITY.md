@@ -93,6 +93,7 @@ StateLens-owned source is scanned separately from generated dependency code. The
 - Automated scope, redaction, parsing, normalization, storage, rollback, purge, and component tests
 - Required formatting, lint, type-check, test, and production-build gates
 - Dependency audit during installation and review of Manifest permissions before release
+- Third-party GitHub Actions pinned to verified full commit SHAs
 - Synthetic fixtures and reserved example domains only
 
 ## Sensitive-data handling for contributors

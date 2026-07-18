@@ -8,11 +8,20 @@ interface TimelineProps {
 }
 
 type TimelineEntry =
-  | { type: "marker"; timestamp: string; sequence: 0; marker: ActionMarker }
+  | {
+      type: "marker";
+      timestamp: string;
+      sequence: 0;
+      workflowId: string;
+      id: string;
+      marker: ActionMarker;
+    }
   | {
       type: "observation";
       timestamp: string;
       sequence: number;
+      workflowId: string;
+      id: string;
       observation: RequestObservation;
     };
 
@@ -22,17 +31,26 @@ export function Timeline({ observations, markers, selectedId, onSelect }: Timeli
       type: "marker",
       timestamp: marker.startedAt,
       sequence: 0,
+      workflowId: marker.workflowId,
+      id: marker.id,
       marker,
     })),
     ...observations.map((observation): TimelineEntry => ({
       type: "observation",
       timestamp: observation.timestamp,
       sequence: observation.sessionSequence,
+      workflowId: observation.workflowId,
+      id: observation.id,
       observation,
     })),
   ].sort((left, right) => {
     const timestampOrder = left.timestamp.localeCompare(right.timestamp);
-    return timestampOrder || left.sequence - right.sequence;
+    return (
+      timestampOrder ||
+      left.sequence - right.sequence ||
+      left.workflowId.localeCompare(right.workflowId) ||
+      left.id.localeCompare(right.id)
+    );
   });
 
   if (entries.length === 0)

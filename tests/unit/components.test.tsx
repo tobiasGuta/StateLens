@@ -7,6 +7,7 @@ import { RecorderBar } from "../../src/panel/components/RecorderBar";
 import {
   FinalizationRecoveryPanel,
   InterruptedWorkflowPanel,
+  InterruptedWorkflowsSection,
 } from "../../src/panel/components/RecoveryPanel";
 import { Timeline } from "../../src/panel/components/Timeline";
 import { normalizeScopeRuleValue } from "../../src/security/scope-validator";
@@ -309,6 +310,23 @@ describe("workflow recovery controls", () => {
     expect(screen.getByRole("button", { name: "Discard empty workflow" })).toBeDisabled();
     fireEvent.click(screen.getByRole("button", { name: "Finalize as interrupted" }));
     await waitFor(() => expect(onFinalize).toHaveBeenCalledTimes(1));
+  });
+
+  it("keeps a dismissed interrupted workflow accessible for review in the same session", () => {
+    const onReview = vi.fn();
+    const workflow = fixtureWorkflow({ name: "Kept interrupted capture" });
+    render(
+      <InterruptedWorkflowsSection
+        candidates={[{ workflow, observationCount: 3, openMarkerCount: 1 }]}
+        keptWorkflowIds={[workflow.id]}
+        disabled={false}
+        onReview={onReview}
+      />,
+    );
+
+    expect(screen.getByText("Kept for review", { exact: false })).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Review recovery" }));
+    expect(onReview).toHaveBeenCalledWith(workflow.id);
   });
 });
 

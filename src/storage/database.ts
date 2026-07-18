@@ -15,7 +15,7 @@ import {
   type Workflow,
 } from "../shared/schemas";
 import type { ZodType } from "zod";
-import { compareObservations } from "../shared/observation-order";
+import { compareObservations, compareWorkflowObservations } from "../shared/observation-order";
 import type {
   InterruptedWorkflowCandidate,
   MarkerActivationResult,
@@ -294,7 +294,7 @@ export class StateLensRepository {
     const validObservations = observations.map((observation) =>
       requestObservationSchema.parse(observation),
     );
-    validObservations.sort(compareObservations);
+    validObservations.sort(compareWorkflowObservations);
     const markers = await transaction
       .objectStore("actionMarkers")
       .index("workflowId")
@@ -372,7 +372,7 @@ export class StateLensRepository {
   async listObservations(workflowId: string): Promise<RequestObservation[]> {
     const values = await this.database.getAllFromIndex("observations", "workflowId", workflowId);
     return (await this.readValidated("observations", values, requestObservationSchema)).sort(
-      compareObservations,
+      compareWorkflowObservations,
     );
   }
 

@@ -110,7 +110,7 @@ Separate Chrome event objects are preserved even when their timestamp, method, U
 
 Stopping drains admitted work before atomically reconciling stored observations, ending open markers, and completing the workflow. If final persistence fails, StateLens enters a blocking finalization-recovery state. The analyst can retry or export evidence, but cannot start another recording, switch capture context, edit scope, or purge until finalization succeeds.
 
-On startup, a stored `recording` workflow with no live collector is treated as interrupted. StateLens never resumes it automatically. The analyst may finalize it as interrupted, keep it for review, or explicitly discard it only when it has no observations.
+On startup, a stored `recording` workflow with no live collector is treated as interrupted. StateLens never resumes it automatically. The analyst may finalize it as interrupted, keep it for review, or explicitly discard it only when it has no observations. Workflows kept for review remain available in the in-session **Interrupted workflows** section until they are reopened and resolved.
 
 ### Review evidence
 

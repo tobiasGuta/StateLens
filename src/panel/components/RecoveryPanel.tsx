@@ -95,3 +95,47 @@ export function InterruptedWorkflowPanel(props: InterruptedWorkflowPanelProps) {
     </section>
   );
 }
+
+interface InterruptedWorkflowsSectionProps {
+  candidates: InterruptedWorkflowCandidate[];
+  activeRecoveryWorkflowId?: string | undefined;
+  keptWorkflowIds: string[];
+  disabled: boolean;
+  onReview: (workflowId: string) => void;
+}
+
+export function InterruptedWorkflowsSection(props: InterruptedWorkflowsSectionProps) {
+  const kept = new Set(props.keptWorkflowIds);
+  return (
+    <section className="interrupted-workflows" aria-labelledby="interrupted-workflows-heading">
+      <div>
+        <h2 id="interrupted-workflows-heading">Interrupted workflows</h2>
+        <p>Stored recordings remain available here until finalized or explicitly discarded.</p>
+      </div>
+      <ul>
+        {props.candidates.map((candidate) => {
+          const workflowId = candidate.workflow.id;
+          const recoveryOpen = workflowId === props.activeRecoveryWorkflowId;
+          return (
+            <li key={workflowId}>
+              <span>
+                <strong>{candidate.workflow.name}</strong>
+                <small>
+                  {candidate.observationCount} observation(s), {candidate.openMarkerCount} open
+                  marker(s) · {kept.has(workflowId) ? "Kept for review" : "Needs recovery"}
+                </small>
+              </span>
+              <button
+                type="button"
+                disabled={props.disabled || recoveryOpen}
+                onClick={() => props.onReview(workflowId)}
+              >
+                {recoveryOpen ? "Recovery open" : "Review recovery"}
+              </button>
+            </li>
+          );
+        })}
+      </ul>
+    </section>
+  );
+}
